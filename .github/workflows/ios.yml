@@ -32,17 +32,19 @@ jobs:
 
       - name: Run unit tests (iPhone 16 simulator)
         run: |
-          set -o pipefail
-          if command -v xcpretty >/dev/null 2>&1; then
-            xcodebuild test \
-              -project AIPhotoInbox.xcodeproj \
-              -scheme AIPhotoInbox \
-              -destination 'platform=iOS Simulator,name=iPhone 16,OS=latest' \
-              | xcpretty
+          if xcodebuild test \
+            -project AIPhotoInbox.xcodeproj \
+            -scheme AIPhotoInbox \
+            -destination 'platform=iOS Simulator,name=iPhone 16,OS=latest' \
+            > /tmp/xcodebuild.log 2>&1; then
+            echo "ALL TESTS PASSED"
           else
-            # xcpretty 不在就裸跑，日志全量保留，别为美化工具引入失败点。
-            xcodebuild test \
-              -project AIPhotoInbox.xcodeproj \
-              -scheme AIPhotoInbox \
-              -destination 'platform=iOS Simulator,name=iPhone 16,OS=latest'
+            echo "=== xcodebuild FAILED; extracted errors below ==="
+            # 把错误行转成 ::error:: 注解，公开仓库下匿名可读，便于无凭据排障
+            grep -E "error:|fatal error:|Testing failed:|Failing tests:" /tmp/xcodebuild.log \
+              | sort -u | head -30 | while IFS= read -r line; do
+                echo "::error::$line"
+              done
+            tail -80 /tmp/xcodebuild.log
+            exit 1
           fi
