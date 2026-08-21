@@ -333,14 +333,16 @@ final class PhotoLibraryDatabase {
     /// 原始单行读取（内部可见，供测试逐字段断言与诊断）。
     func row(forSQL sql: String, arguments: [Any] = []) -> Row? {
         try? writer.read { db in
-            try Row.fetchOne(db, sql: sql, arguments: StatementArguments(arguments))
+            // 调用方契约：只传可绑定类型（String/Int/Double/Bool/Data/nil），
+            // StatementArguments 的 failable init 因此不会失败。
+            try Row.fetchOne(db, sql: sql, arguments: StatementArguments(arguments)!)
         }
     }
 
     /// 抛错的原始写入口（内部可见，供测试验证 DDL CHECK/外键约束真实存在）。
     func executeRaw(sql: String, arguments: [Any] = []) throws {
         try writer.write { db in
-            try db.execute(sql: sql, arguments: StatementArguments(arguments))
+            try db.execute(sql: sql, arguments: StatementArguments(arguments)!)
         }
     }
 
