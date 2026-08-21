@@ -44,7 +44,7 @@ final class PhotoLibraryChangeMonitor: NSObject, PHPhotoLibraryChangeObserver {
     // PhotoKit 在任意后台队列回调：在 stateQueue 上取一致性快照，
     // 主线程投递放在最后一步。
     func photoLibraryDidChange(_ changeInstance: PHChange) {
-        let event: PhotoLibraryChangeEvent? = stateQueue.sync {
+        let event: PhotoLibraryChangeEvent? = stateQueue.sync { () -> PhotoLibraryChangeEvent? in
             guard let result = observedResult,
                   let details = changeInstance.changeDetails(for: result) else { return nil }
 
