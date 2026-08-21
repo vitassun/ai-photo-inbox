@@ -57,7 +57,7 @@ final class PhotoLibraryChangeMonitor: NSObject, PHPhotoLibraryChangeObserver {
                 .filter { !removedSet.contains($0) }
 
             // 以变更后的结果作为下一轮 diff 基准。
-            observedResult = details.resultAfterChanges ?? result
+            observedResult = details.fetchResultAfterChanges
 
             return PhotoLibraryChangeEvent(
                 insertedIdentifiers: inserted,
