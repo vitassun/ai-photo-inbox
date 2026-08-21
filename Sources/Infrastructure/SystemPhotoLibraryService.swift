@@ -12,6 +12,7 @@
 // CI 模拟器可全覆盖单测（含 creationDate 回退与未知 id 契约）。
 
 import Photos
+import PhotosUI   // presentLimitedLibraryPicker 所在框架
 import UIKit
 
 /// PHAsset 在扫描时刻的字段快照。只承载数据，不含行为；
