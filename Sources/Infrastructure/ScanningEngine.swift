@@ -95,6 +95,11 @@ final class ScanningEngine: ScanningEngineProtocol {
     // MARK: 驱动循环（以下方法只允许在 workQueue 上执行）
 
     private func startDrivingOnQueue() {
+        // idle 引导：全新/重置后的扫描从这里迈出第一步。
+        if machine.phase == .idle {
+            machine.advance()
+            publishSnapshot()
+        }
         guard !isDriving, machine.isActive else { return }
         isDriving = true
         driveUntilInactive()
