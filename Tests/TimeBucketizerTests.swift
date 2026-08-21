@@ -52,7 +52,7 @@ final class TimeBucketizerTests: XCTestCase {
     func testCrossMidnightSmallGapStaysTogether() {
         // 跨天本身不切桶，只看间隔：23:50 与次日 00:10 相隔 20 分钟 → 同桶。
         var calendar = Calendar(identifier: .gregorian)
-        calendar.timeZone = TimeZone(identifier: "UTC")
+        calendar.timeZone = TimeZone(identifier: "UTC")!
         guard let nearMidnight = calendar.date(
             from: DateComponents(year: 2025, month: 6, day: 1, hour: 23, minute: 50)
         ) else {
