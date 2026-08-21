@@ -89,6 +89,14 @@ final class ScanningEngineTests: XCTestCase {
         }
     }
 
+    /// paused 带关联值，相等断言需经模式匹配。
+    private func assertPaused(_ phase: ScanPhase, _ message: String = "") {
+        guard case .paused = phase else {
+            XCTFail("期望 paused \(message)，实际 \(phase)")
+            return
+        }
+    }
+
     // MARK: 端到端：fetching 落表 → 占位推进 → done
 
     func testEndToEndPipelinePersistsAssetsAndReachesDone() throws {
@@ -230,7 +238,7 @@ final class ScanningEngineTests: XCTestCase {
         queue.sync { }
 
         // 关键契约：暂停生效、未推进过 fetching——残缺快照不得冒充全量进后续阶段。
-        XCTAssertEqual(engine.state, .paused)
+        assertPaused(engine.state)
         XCTAssertEqual(database.assetCount(), 0)
         XCTAssertEqual(fakeService.fetchAllCallCount, 1)
 
