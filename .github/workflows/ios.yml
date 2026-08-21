@@ -40,12 +40,14 @@ jobs:
             echo "ALL TESTS PASSED"
             # 每个测试套件汇总成一条 ::notice:: 注解（匿名可读核实用例数；
             # GitHub 每步注解上限 10 条，故一行打包一个套件名与其用例数）
-            awk '/Test Suite .*Tests. passed after/ {pending=$0}
+            awk '/Test Suite .*Tests. passed/ {pending=$0}
                  /Executed [0-9]+ tests,/ {
                    if (pending != "") {
                      gsub(/.*Test Suite ./, "", pending)
-                     gsub(/. passed after.*/, "", pending)
-                     print pending ": " $0
+                     gsub(/. passed.*/, "", pending)
+                     line=$0
+                     gsub(/^[ \t]+/, "", line)
+                     print pending ": " line
                      pending=""
                    }
                  }' /tmp/xcodebuild.log | while IFS= read -r line; do
