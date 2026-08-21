@@ -18,7 +18,7 @@ ios/
 │   │   ├── Scanning/            # ScanStateMachine —— 可恢复扫描状态机（T07）
 │   │   └── Protocols/           # KeyValueStore / PhotoLibraryService / VisionAnalysisService
 │   └── Infrastructure/          # PhotoKit/Vision 适配层：允许 import 框架，V1 为 TODO 占位
-│       ├── SystemPhotoLibraryService.swift   (T02/T08)
+│       ├── SystemPhotoLibraryService.swift   (T02/T10)
 │       └── VisionAnalysisService.swift       (T05)
 ├── Tests/                       # 纯逻辑单测，CI 模拟器可跑，无需真机
 └── .github/workflows/ios.yml    # macOS runner：xcodegen → xcodebuild test
@@ -75,7 +75,7 @@ V1 自用/内测不需要 $99/年 的开发者账号：
 3. 手机上 设置 → 通用 → VPN 与设备管理 → 信任该证书；
 4. **免费签名 7 天过期**：到期后重新用 Sideloadly 签一次即可（App 数据一般保留，
    重要阶段先备份）；免费账号同时最多 3 个侧载 App。
-5. 注意：删除相册能力需要真机实测（T08），模拟器相册库是空的，别拿它验收 PhotoKit 行为。
+5. 注意：删除相册能力需要真机实测（T10），模拟器相册库是空的，别拿它验收 PhotoKit 行为。
 
 ## 安全红线（改动任何相关代码前必读）
 
@@ -89,15 +89,17 @@ V1 自用/内测不需要 $99/年 的开发者账号：
 
 ## 任务卡对照
 
+> 权威任务索引（含规模/依赖，T01–T14）见 `../tasks/README.md`；本表只标本仓库骨架落点。
+
 | 卡 | 内容 | 骨架落点 |
 |---|---|---|
-| T01 | 工程骨架 + 首次 CI 调通 | project.yml / ios.yml / 全部测试 |
-| T02 | PhotoKit 元数据拉取 | Infrastructure/SystemPhotoLibraryService.swift |
-| T03 | GRDB(SQLite) 持久化 | KeyValueStore 生产实现（project.yml 已留 packages 注释） |
-| T04 | 分组算法 | Core/Grouping/TimeBucketizer.swift |
-| T05 | Vision 六项分析 | Infrastructure/VisionAnalysisService.swift |
-| T06 | 评分引擎校准 | Core/Scoring/KeepScore.swift |
-| T07 | 扫描状态机接线 | Core/Scanning/ScanStateMachine.swift |
-| T08 | 安全删除流 | SystemPhotoLibraryService.requestDelete |
-| T09 | LLM 裁决 JSON 解析 | Verdict 消费方（待建） |
-| T10 | 安全红线 | Core/Safety/SafetyRules.swift |
+| T01 | 项目骨架与 CI 绿灯 | project.yml / .github/workflows/ios.yml / 全部测试 |
+| T02 | 授权与资产拉取层（含变更监听） | Infrastructure/SystemPhotoLibraryService.swift |
+| T03 | 扫描状态机接入真实管线 + GRDB 持久化 | ScanStateMachine 接线 + KeyValueStore 生产实现 |
+| T04 | 时间地理分桶 + pHash 粗筛 | Core/Grouping/TimeBucketizer.swift |
+| T05 | FeaturePrint 聚类 + 阈值回归集 | Infrastructure/VisionAnalysisService.swift |
+| T06 | 低质量检测 DSP + EXIF 夜间白名单 | Core/Scoring/KeepScore.swift |
+| T07 | 大媒体大小估算模型 + LivePhoto 配对 | 待建 |
+| T08 | Best Shot 特征整合（人脸/显著性/美学） | VisionAnalysisService 产出特征，消费方待建 |
+| T09 | 保留分引擎接线 + SafetyRules 集成 | 管线挂载点待建 |
+| T10 | 安全删除流（确认框/批量 UI/教育页） | SystemPhotoLibraryService.requestDelete |

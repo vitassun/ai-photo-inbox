@@ -28,7 +28,7 @@ enum SafetyRules {
 
     /// 判定某资产是否允许进入"预选删除"名单。
     /// 注意语义：预选 ≠ 删除。预选只是把它摆进待确认清单，
-    /// 真正删除永远要过 PHPhotoLibrary.performChanges 的系统确认框（T08）。
+    /// 真正删除永远要过 PHPhotoLibrary.performChanges 的系统确认框（T10）。
     /// - Parameters:
     ///   - asset: 资产快照。
     ///   - groupSize: 该资产所在候选组的成员数。

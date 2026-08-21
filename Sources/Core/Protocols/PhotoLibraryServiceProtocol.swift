@@ -1,7 +1,7 @@
 // MARK: - PhotoLibraryServiceProtocol
 // 职责：PhotoKit 能力的协议抽象（授权/元数据拉取/删除请求）。
 //       纯逻辑层与 ViewModel 只依赖本协议；真实现见 Infrastructure/SystemPhotoLibraryService。
-// 任务卡：T02（拉取）/ T08（删除流）。
+// 任务卡：T02（拉取）/ T10（删除流）。
 
 import Foundation
 
@@ -31,7 +31,7 @@ protocol PhotoLibraryServiceProtocol {
 
     /// 发起删除请求。
     ///
-    /// 红线（T08）：实现必须走 PHPhotoLibrary.performChanges +
+    /// 红线（T10）：实现必须走 PHPhotoLibrary.performChanges +
     /// PHAssetChangeRequest.deleteAssets，让系统弹确认框由用户逐次批准；
     /// 本协议刻意不提供任何绕过系统确认的删除通道，review 时按此验收。
     func requestDelete(

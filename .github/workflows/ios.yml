@@ -27,6 +27,23 @@ jobs:
       - name: Generate Xcode project
         run: xcodegen generate
 
+      - name: Assert Core layer never imports Photos (T02 red line)
+        run: |
+          # 只匹配行首真正的 import 语句——Core 层注释里含"import Photos"字样属正当文档，不许误伤。
+          # 显式区分退出码：0=违规；2+=目录缺失等检查自身故障也按失败处理（fail-closed，
+          # 防止路径变动后红线检查在全绿掩护下静默失效）。注意步骤默认 bash -eo pipefail，
+          # 裸 grep 的 rc=1（干净）会触发 errexit，故用 || 接住退出码。
+          rc=0
+          grep -rnE '^[[:space:]]*import[[:space:]]+Photos[[:space:]]*$' Sources/Core/ || rc=$?
+          if [ "$rc" -eq 0 ]; then
+            echo "::error::Sources/Core/ 出现 import Photos，违反架构红线"
+            exit 1
+          elif [ "$rc" -ge 2 ]; then
+            echo "::error::红线检查自身失败（grep rc=$rc），按违规处理"
+            exit 1
+          fi
+          echo "Core layer clean: no PhotoKit imports"
+
       - name: List available simulators (debug aid)
         run: xcrun simctl list devices available | head -n 30
 
