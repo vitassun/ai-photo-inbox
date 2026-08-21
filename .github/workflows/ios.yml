@@ -38,6 +38,11 @@ jobs:
             -destination 'platform=iOS Simulator,name=iPhone 16,OS=latest' \
             > /tmp/xcodebuild.log 2>&1; then
             echo "ALL TESTS PASSED"
+            # 各测试套件汇总行转成 ::notice:: 注解，公开仓库下匿名可读，便于无凭据核实用例数
+            grep -E "Test Suite '.*' passed|Executed [0-9]+ tests" /tmp/xcodebuild.log \
+              | sort -u | head -40 | while IFS= read -r line; do
+                echo "::notice::$line"
+              done
           else
             echo "=== xcodebuild FAILED; extracted errors below ==="
             # 把错误行转成 ::error:: 注解，公开仓库下匿名可读，便于无凭据排障
