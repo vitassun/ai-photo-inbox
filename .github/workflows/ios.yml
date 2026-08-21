@@ -1,0 +1,48 @@
+# iOS CI：XcodeGen 生成工程 → iPhone 16 模拟器跑纯逻辑单测
+# 任务卡：T01。注意：本目录（ios/）将来整体作为独立 git 仓库根，
+# 届时本文件位于仓库的 .github/workflows/ 才会被 GitHub 识别。
+name: ios-ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: macos-15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          xcodebuild -version
+          sw_vers
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: List available simulators (debug aid)
+        run: xcrun simctl list devices available | head -n 30
+
+      - name: Run unit tests (iPhone 16 simulator)
+        run: |
+          set -o pipefail
+          if command -v xcpretty >/dev/null 2>&1; then
+            xcodebuild test \
+              -project AIPhotoInbox.xcodeproj \
+              -scheme AIPhotoInbox \
+              -destination 'platform=iOS Simulator,name=iPhone 16,OS=latest' \
+              | xcpretty
+          else
+            # xcpretty 不在就裸跑，日志全量保留，别为美化工具引入失败点。
+            xcodebuild test \
+              -project AIPhotoInbox.xcodeproj \
+              -scheme AIPhotoInbox \
+              -destination 'platform=iOS Simulator,name=iPhone 16,OS=latest'
+          fi

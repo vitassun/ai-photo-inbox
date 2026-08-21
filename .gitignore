@@ -1,0 +1,13 @@
+# XcodeGen 生成物：永远不提交，改工程只改 project.yml
+*.xcodeproj/
+
+# Xcode 个人状态
+xcuserdata/
+*.xcuserstate
+.DS_Store
+
+# 构建产物
+DerivedData/
+build/
+*.ipa
+*.dSYM.zip

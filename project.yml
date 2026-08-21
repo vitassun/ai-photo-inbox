@@ -1,0 +1,63 @@
+# project.yml — XcodeGen 工程定义（任务卡 T01：工程骨架与首次 CI）
+# 用法：cd ios && xcodegen generate  →  生成 AIPhotoInbox.xcodeproj
+# 铁律：pbxproj 是生成物，永远不手改、不提交（见 .gitignore）。
+#
+# 未来接入本地库 GRDB（任务卡 T03，SQLite 持久化扫描状态）时，在顶层添加：
+#   packages:
+#     GRDB:
+#       url: https://github.com/groue/GRDB.swift
+#       from: "6.0.0"
+# 并在 target.dependencies 下加：- package: GRDB
+
+name: AIPhotoInbox
+
+options:
+  bundleIdPrefix: com.aiphotoinbox
+  deploymentTarget:
+    iOS: "18.0"            # iOS 18 起才有 VNCalculateImageAestheticsScoresRequest 美学评分
+  createIntermediateGroups: true
+
+settings:
+  base:
+    # 注意：SWIFT_VERSION 是"语言模式"，合法值只有 4.0/4.2/5.0/6.0，不存在 5.9。
+    # "保守朴素的 Swift 5.9 语法" = Swift 5 语言模式 + Xcode 15/16 编译器，故此处必须写 5.0。
+    SWIFT_VERSION: "5.0"
+    IPHONEOS_DEPLOYMENT_TARGET: "18.0"
+    TARGETED_DEVICE_FAMILY: "1"      # V1 只做 iPhone
+    ENABLE_TESTABILITY: YES          # Debug 下允许 @testable import
+
+targets:
+  AIPhotoInbox:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.aiphotoinbox.app
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_NSPhotoLibraryUsageDescription: "需要访问你的相册来整理和筛选照片；删除操作永远经系统确认框由你亲自批准。"
+
+  AIPhotoInboxTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: Tests
+    dependencies:
+      # 依赖 app target 后，XcodeGen 自动设置 TEST_HOST / BUNDLE_LOADER（测试宿主为 App）。
+      - target: AIPhotoInbox
+
+schemes:
+  AIPhotoInbox:
+    build:
+      targets:
+        AIPhotoInbox: all
+        AIPhotoInboxTests: [test]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      gatherCoverageData: false
+      targets:
+        - AIPhotoInboxTests
