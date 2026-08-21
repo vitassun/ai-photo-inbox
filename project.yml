@@ -11,6 +11,12 @@
 
 name: AIPhotoInbox
 
+packages:
+  # 唯一第三方依赖（任务卡 T03）：SQLite 持久化。
+  GRDB:
+    url: https://github.com/groue/GRDB.swift
+    from: "6.0.0"
+
 options:
   bundleIdPrefix: com.aiphotoinbox
   deploymentTarget:
@@ -38,6 +44,8 @@ targets:
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
         INFOPLIST_KEY_NSPhotoLibraryUsageDescription: "需要访问你的相册来整理和筛选照片；删除操作永远经系统确认框由你亲自批准。"
+    dependencies:
+      - package: GRDB
 
   AIPhotoInboxTests:
     type: bundle.unit-test
@@ -50,6 +58,7 @@ targets:
     dependencies:
       # 依赖 app target 后，XcodeGen 自动设置 TEST_HOST / BUNDLE_LOADER（测试宿主为 App）。
       - target: AIPhotoInbox
+      - package: GRDB
 
 schemes:
   AIPhotoInbox:
