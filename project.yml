@@ -44,6 +44,9 @@ targets:
     platform: iOS
     sources:
       - path: Tests
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
     dependencies:
       # 依赖 app target 后，XcodeGen 自动设置 TEST_HOST / BUNDLE_LOADER（测试宿主为 App）。
       - target: AIPhotoInbox
