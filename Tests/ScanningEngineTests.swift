@@ -216,8 +216,9 @@ final class ScanningEngineTests: XCTestCase {
         runAndWait(engine, workQueue: queue, progressLog: ProgressLog())
 
         // 从头重扫 + 脏特征被清（保留当前版本之外全部删除）。
+        // 注：为满足外键而种的 "stale" 资产行本身保留——本卡只清旧版本特征。
         XCTAssertEqual(fakeService.fetchAllCallCount, 1)
-        XCTAssertEqual(database.assetCount(), 2)
+        XCTAssertEqual(database.assetCount(), 3)
         XCTAssertEqual(database.featureprintCount(), 0)
         XCTAssertEqual(engine.state, .done)
     }
@@ -242,7 +243,8 @@ final class ScanningEngineTests: XCTestCase {
         XCTAssertEqual(database.assetCount(), 0)
         XCTAssertEqual(fakeService.fetchAllCallCount, 1)
 
-        // 恢复后从 fetching 继续，补齐全部资产到 done。
+        // 清掉暂停钩子后恢复：从 fetching 继续并补齐全部资产到 done。
+        fakeService.onFetchBegin = nil
         engine.resume()
         queue.sync { }
         XCTAssertEqual(engine.state, .done)
