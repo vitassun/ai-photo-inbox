@@ -99,7 +99,9 @@ final class ScanningEngine: ScanningEngineProtocol {
             var keptGroups: [CandidateGroup] = []
             for group in self.candidateGroupsSnapshot {
                 let remaining = group.members.filter { !deleted.contains($0.localIdentifier) }
-                if remaining.count >= 2 { keptGroups.append(group) }
+                if remaining.count >= 2 {
+                    keptGroups.append(CandidateGroup(id: group.id, members: remaining, reason: group.reason))
+                }
             }
             self.candidateGroupsSnapshot = keptGroups
 
