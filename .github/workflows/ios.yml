@@ -15,7 +15,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
       - name: Show toolchain
         run: |
           xcodebuild -version
@@ -89,3 +88,42 @@ jobs:
             tail -80 /tmp/xcodebuild.log
             exit 1
           fi
+
+  # 免签名设备构建：产出 Payload zip（下载后改名 .ipa 喂 Sideloadly）。
+  # 免费签名路线不需要开发者账号；签名动作在用户本机的 Sideloadly 完成。
+  device-build:
+    runs-on: macos-15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Build unsigned device app (Release / iphoneos)
+        run: |
+          xcodebuild \
+            -project AIPhotoInbox.xcodeproj \
+            -scheme AIPhotoInbox \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY="" \
+            build
+
+      - name: Package Payload zip
+        run: |
+          mkdir -p Payload
+          cp -R "build/Build/Products/Release-iphoneos/AIPhotoInbox.app" Payload/
+          zip -qr AIPhotoInbox-unsigned.zip Payload
+          unzip -l AIPhotoInbox-unsigned.zip | head -20
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AIPhotoInbox-unsigned
+          path: AIPhotoInbox-unsigned.zip
+          retention-days: 14
