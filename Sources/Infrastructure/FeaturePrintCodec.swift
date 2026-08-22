@@ -39,15 +39,15 @@ enum FeaturePrintCodec {
     static func decodeEmbedding(_ data: Data) -> [Double]? {
         guard let kind = data.first, kind == Kind.embedding.rawValue else { return nil }
         let payload = data.dropFirst()
-        let stride = MemoryLayout<Double>.size
-        guard !payload.isEmpty, payload.count % stride == 0 else { return nil }
+        let elementSize = MemoryLayout<Double>.size
+        guard !payload.isEmpty, payload.count % elementSize == 0 else { return nil }
         var vector: [Double] = []
-        vector.reserveCapacity(payload.count / stride)
+        vector.reserveCapacity(payload.count / elementSize)
         payload.withUnsafeBytes { raw in
             let base = raw.baseAddress!.assumingMemoryBound(to: UInt8.self)
-            for offset in stride(from: 0, to: payload.count, by: stride) {
+            for offset in stride(from: 0, to: payload.count, by: elementSize) {
                 var bits: UInt64 = 0
-                for byteIndex in 0..<stride {
+                for byteIndex in 0..<elementSize {
                     bits |= UInt64(base[offset + byteIndex]) << (8 * byteIndex)
                 }
                 vector.append(Double(bitPattern: UInt64(littleEndian: bits)))
