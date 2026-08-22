@@ -13,12 +13,13 @@ final class GroupingTests: XCTestCase {
     // MARK: 汉明距离
 
     func testHammingDistanceBasics() {
-        XCTAssertEqual(HashDistance.hamming(hexA: "ffffffff", hexB: "ffffffff"), 0)
-        XCTAssertEqual(HashDistance.hamming(hexA: "00000000", hexB: "ffffffff"), 64)
+        XCTAssertEqual(HashDistance.hamming(hexA: "ffffffffffffffff", hexB: "ffffffffffffffff"), 0)
+        XCTAssertEqual(HashDistance.hamming(hexA: "0000000000000000", hexB: "ffffffffffffffff"), 64)
         // a=1010 c=1100 差 2 位；b=1011 d=1101 差 2 位 → 合计 4。
         XCTAssertEqual(HashDistance.hamming(hexA: "ab", hexB: "cd"), 4)
         XCTAssertNil(HashDistance.hamming(hexA: "abc", hexB: "abcd"))   // 长度不等不可比
         XCTAssertNil(HashDistance.hamming(hexA: "", hexB: ""))
+        XCTAssertNil(HashDistance.hamming(hexA: "zz", hexB: "zz"))      // 非法十六进制字符
     }
 
     // MARK: 地理聚类
