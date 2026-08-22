@@ -28,8 +28,8 @@ final class EmbeddingClustererTests: XCTestCase {
     func testEuclideanRequiresSameDimension() {
         XCTAssertNil(EmbeddingMath.euclidean([1, 2], [1, 2, 3]))
         XCTAssertNil(EmbeddingMath.euclidean([], []))
-        XCTAssertEqual(EmbeddingMath.euclidean([0, 1], [0, 1]), 0, accuracy: 0.0001)
-        XCTAssertEqual(EmbeddingMath.euclidean([1, 0], [0, 1]), (2.0).squareRoot(), accuracy: 0.0001)
+        XCTAssertEqual(EmbeddingMath.euclidean([0, 1], [0, 1])!, 0, accuracy: 0.0001)
+        XCTAssertEqual(EmbeddingMath.euclidean([1, 0], [0, 1])!, (2.0).squareRoot(), accuracy: 0.0001)
     }
 
     // MARK: 聚类四类边界（验收标准第 1 条）
@@ -77,7 +77,12 @@ final class EmbeddingClustererTests: XCTestCase {
         let first = EmbeddingClusterer.components(of: input)
         let second = EmbeddingClusterer.components(of: input)
         XCTAssertEqual(first, second, "同输入必须同输出")
-        XCTAssertEqual(first.map(Set.init), Set([Set(["m0", "m1"]), Set(["m2", "m3"]), Set(["m4"])]))
+        XCTAssertEqual(first.count, 3)
+        let multiMember = first.filter { $0.count > 1 }.map { Set($0) }
+        XCTAssertEqual(
+            Set(multiMember.map { $0.sorted().joined(separator: "|") }),
+            Set(["m0|m1", "m2|m3"])
+        )
     }
 
     // MARK: 特征信封编解码
