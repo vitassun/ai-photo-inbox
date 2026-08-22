@@ -14,21 +14,7 @@ struct AIPhotoInboxApp: App {
 
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            DailyInboxView()   // T14：打开即见摘要首页，替换 T01 占位页
         }
-    }
-}
-
-/// 占位首页：T07/T12 接扫描仪表盘时替换。
-struct ContentView: View {
-    var body: some View {
-        VStack(spacing: 12) {
-            Text("AI Photo Inbox")
-                .font(.headline)
-            Text("骨架就绪 · 等待扫描流水线接入")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        }
-        .padding()
     }
 }

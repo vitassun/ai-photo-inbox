@@ -298,6 +298,42 @@ final class PhotoLibraryDatabase {
         return ids
     }
 
+    // MARK: Daily Inbox 计数（T14）
+
+    /// 当日新增：拍摄时间 ≥ 窗口起点（epoch 秒）的资产数。
+    func countAssets(createdAtOrAfter windowStart: Date) -> Int {
+        (try? writer.read { db in
+            try Int.fetchOne(
+                db,
+                sql: "SELECT COUNT(*) FROM assets WHERE creation_date >= ?",
+                arguments: [windowStart.timeIntervalSince1970]
+            )
+        }) ?? 0
+    }
+
+    /// 当日任务动作数：decisions 里 reason 以 "action:" 开头且时间在窗口内。
+    func countActions(atOrAfter windowStart: Date) -> Int {
+        (try? writer.read { db in
+            try Int.fetchOne(
+                db,
+                sql: "SELECT COUNT(*) FROM decisions WHERE reason LIKE 'action:%' AND decided_at >= ?",
+                arguments: [windowStart.timeIntervalSince1970]
+            )
+        }) ?? 0
+    }
+
+    /// 当前有效删除裁决数（verdict='delete' 的去重资产数）。
+    func countDeleteVerdicts() -> Int {
+        (try? writer.read { db in
+            try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM decisions WHERE verdict = 'delete'")
+        }) ?? 0
+    }
+
+    /// 任务动作落库（T12 动作执行后调用，供 Daily Inbox 统计）。
+    func markActionTaken(assetId: String, action: String, at date: Date = Date()) {
+        setDecision(assetId: assetId, verdict: .todo, reason: "action:\(action)", decidedAt: date)
+    }
+
     /// 丢弃非当前版本的特征行（ScanStateMachine.FEATURE_VERSION 变更后的脏数据清理）。
     func purgeFeatureprints(keepingFeatureVersion version: Int) {
         try? writer.write { db in

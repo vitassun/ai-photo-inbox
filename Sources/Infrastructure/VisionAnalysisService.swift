@@ -167,6 +167,17 @@ final class VisionAnalysisService: VisionAnalysisServiceProtocol {
         case imageDecodeFailed
     }
 
+    /// CGImage 便捷入口（生产装配用）：解码 → 提取向量。
+    static func extractVectorFromCGImage(_ cgImage: CGImage) throws -> [Double] {
+        let request = VNGenerateImageFeaturePrintRequest()
+        let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
+        try handler.perform([request])
+        guard let observation = request.results?.first as? VNFeaturePrintObservation else {
+            throw VisionAnalysisError.noObservation
+        }
+        return try extractVector(observation)
+    }
+
     /// VNFeaturePrintObservation → [Double]。公开 API 无逐元素访问器，
     /// 标准做法是从 data 缓冲按 elementType 整块拷贝
     /// （float=4 字节/元素，double=8 字节/元素）。
