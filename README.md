@@ -96,10 +96,10 @@ V1 自用/内测不需要 $99/年 的开发者账号：
 | T01 | 项目骨架与 CI 绿灯 | project.yml / .github/workflows/ios.yml / 全部测试 |
 | T02 | 授权与资产拉取层（含变更监听） | Infrastructure/SystemPhotoLibraryService.swift |
 | T03 | 扫描状态机接入真实管线 + GRDB 持久化 | ScanStateMachine 接线 + KeyValueStore 生产实现 |
-| T04 | 时间地理分桶 + pHash 粗筛 | Core/Grouping/TimeBucketizer.swift |
+| T04 | 时间地理分桶 + pHash 粗筛 | Core/Grouping/* + Infrastructure/PerceptualHash.swift |
 | T05 | FeaturePrint 聚类 + 阈值回归集 | Infrastructure/VisionAnalysisService.swift |
-| T06 | 低质量检测 DSP + EXIF 夜间白名单 | Core/Scoring/KeepScore.swift |
-| T07 | 大媒体大小估算模型 + LivePhoto 配对 | 待建 |
+| T06 | 低质量检测 DSP + EXIF 夜间白名单 | Core/Quality/ImageQualityDSP.swift |
+| T07 | 大媒体估算模型 + LivePhoto 配对 | Core/Media/* |
 | T08 | Best Shot 特征整合（人脸/显著性/美学） | VisionAnalysisService 产出特征，消费方待建 |
 | T09 | 保留分引擎接线 + SafetyRules 集成 | 管线挂载点待建 |
 | T10 | 安全删除流（确认框/批量 UI/教育页） | SystemPhotoLibraryService.requestDelete |

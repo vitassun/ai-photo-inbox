@@ -22,7 +22,8 @@ final class PhotoLibraryDatabaseTests: XCTestCase {
         height: Int = 1080,
         duration: Double = 0,
         creationDate: Date? = Date(timeIntervalSince1970: 1_700_000_000),
-        isScreenshot: Bool = false
+        isScreenshot: Bool = false,
+        isLivePhoto: Bool = false
     ) -> AssetRecord {
         AssetRecord(
             localIdentifier: id,
@@ -33,7 +34,10 @@ final class PhotoLibraryDatabaseTests: XCTestCase {
             pixelHeight: height,
             duration: duration,
             creationDate: creationDate,
-            isScreenshot: isScreenshot
+            isScreenshot: isScreenshot,
+            isLivePhoto: isLivePhoto,
+            latitude: nil,
+            longitude: nil
         )
     }
 

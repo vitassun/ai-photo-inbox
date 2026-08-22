@@ -43,7 +43,9 @@ final class ScanningEngineTests: XCTestCase {
     private func makeRecord(
         id: String,
         mediaType: AssetMediaType = .image,
-        creationDate: Date? = nil
+        creationDate: Date? = nil,
+        latitude: Double? = nil,
+        longitude: Double? = nil
     ) -> AssetRecord {
         AssetRecord(
             localIdentifier: id,
@@ -54,7 +56,10 @@ final class ScanningEngineTests: XCTestCase {
             pixelHeight: 100,
             duration: 0,
             creationDate: creationDate ?? Date(timeIntervalSince1970: 1_700_000_000),
-            isScreenshot: false
+            isScreenshot: false,
+            isLivePhoto: false,
+            latitude: latitude,
+            longitude: longitude
         )
     }
 
@@ -221,6 +226,57 @@ final class ScanningEngineTests: XCTestCase {
         XCTAssertEqual(database.assetCount(), 3)
         XCTAssertEqual(database.featureprintCount(), 0)
         XCTAssertEqual(engine.state, .done)
+    }
+
+    // MARK: 杀进程后恢复进 hashing：复用已存哈希，不整段空转
+
+    func testResumeIntoHashingReusesPersistedHashesAndCompletes() throws {
+        let database = try PhotoLibraryDatabase.inMemory()
+        let store = GRDBKeyValueStore(database: database)
+        let queue = DispatchQueue(label: "test.engine.hashresume")
+
+        // 上一进程死在 hashing/0.2；asset-0 与 asset-1 的哈希已算完落库。
+        let previousMachine = ScanStateMachine(store: store)
+        previousMachine.advance()
+        previousMachine.advance()
+        previousMachine.setProgress(0.2)
+        let persistedHex = String(repeating: "a", count: 16)
+        for id in ["asset-0", "asset-1"] {
+            // 特征表有外键，先落父资产行。
+            database.upsert(asset: makeRecord(
+                id: id,
+                creationDate: Date(timeIntervalSince1970: 1_700_000_000 + (id == "asset-0" ? 0 : 30))
+            ), fetchedAt: Date())
+            database.upsertFeatureprint(assetId: id, data: Data(persistedHex.utf8), featureVersion: 1, computedAt: Date())
+        }
+
+        // 新进程：loader 永远返回 nil（模拟图像不可得），只能靠复用已存哈希成组。
+        var loaderCalledIDs: [String] = []
+        let fakeService = FakePhotoLibraryService(records: makeRecords(4))
+        let engine = ScanningEngine(
+            photoLibrary: fakeService,
+            database: database,
+            store: store,
+            imageDataLoader: { id in
+                loaderCalledIDs.append(id)
+                return nil
+            },
+            hashComputer: { _ in nil },
+            workQueue: queue
+        )
+        XCTAssertEqual(engine.state, .hashing, "构造即恢复到 hashing")
+
+        engine.runFullScan { _, _ in }
+        queue.sync { }
+
+        XCTAssertEqual(engine.state, .done)
+        XCTAssertEqual(fakeService.fetchAllCallCount, 1, "续跑时重拉一次元数据重建内存快照")
+        XCTAssertFalse(loaderCalledIDs.contains("asset-0"), "已存哈希的资产不再重算")
+        XCTAssertFalse(loaderCalledIDs.contains("asset-1"), "已存哈希的资产不再重算")
+
+        // 候选组从持久化哈希正确产出。
+        XCTAssertEqual(engine.candidateGroups.count, 1)
+        XCTAssertEqual(engine.candidateGroups.first?.memberIDs, ["asset-0", "asset-1"])
     }
 
     // MARK: fetching 中途暂停：不得推进阶段，恢复后补齐尾部

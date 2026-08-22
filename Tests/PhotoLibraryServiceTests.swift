@@ -35,7 +35,10 @@ final class PhotoLibraryServiceTests: XCTestCase {
         duration: Double = 0,
         creationDate: Date? = nil,
         modificationDate: Date? = nil,
-        isScreenshot: Bool = false
+        isScreenshot: Bool = false,
+        isLivePhoto: Bool = false,
+        latitude: Double? = nil,
+        longitude: Double? = nil
     ) -> PHAssetSnapshot {
         PHAssetSnapshot(
             localIdentifier: id,
@@ -47,7 +50,10 @@ final class PhotoLibraryServiceTests: XCTestCase {
             duration: duration,
             creationDate: creationDate,
             modificationDate: modificationDate,
-            isScreenshot: isScreenshot
+            isScreenshot: isScreenshot,
+            isLivePhoto: isLivePhoto,
+            latitude: latitude,
+            longitude: longitude
         )
     }
 

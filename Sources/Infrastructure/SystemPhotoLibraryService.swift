@@ -32,6 +32,11 @@ struct PHAssetSnapshot {
     let creationDate: Date?
     let modificationDate: Date?
     let isScreenshot: Bool
+    /// 是否 Live Photo（.photoLive 子类型；删除须原子处理，见 T07/T10）。
+    let isLivePhoto: Bool
+    /// 拍摄地坐标（度）；资产无 GPS 信息时为 nil。仅扫描当轮内存使用，不落库。
+    let latitude: Double?
+    let longitude: Double?
 
     /// 纯函数：快照 → AssetRecord。creationDate 为 nil 时回退 modificationDate
     /// （该回退策略全仓只允许出现在这一处，见任务卡 T02 边界）；
@@ -47,7 +52,10 @@ struct PHAssetSnapshot {
             pixelHeight: pixelHeight,
             duration: duration,
             creationDate: creationDate ?? modificationDate,
-            isScreenshot: isScreenshot
+            isScreenshot: isScreenshot,
+            isLivePhoto: isLivePhoto,
+            latitude: latitude,
+            longitude: longitude
         )
     }
 }
@@ -65,6 +73,14 @@ extension PHAssetSnapshot {
         creationDate = phAsset.creationDate
         modificationDate = phAsset.modificationDate
         isScreenshot = phAsset.mediaSubtypes.contains(.photoScreenshot)
+        isLivePhoto = phAsset.mediaSubtypes.contains(.photoLive)
+        if let coordinate = phAsset.location?.coordinate {
+            latitude = coordinate.latitude
+            longitude = coordinate.longitude
+        } else {
+            latitude = nil
+            longitude = nil
+        }
     }
 }
 

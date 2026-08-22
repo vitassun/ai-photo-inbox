@@ -28,6 +28,20 @@ final class ScanningEngine: ScanningEngineProtocol {
     private var pauseRequested = false
 
     private var progressHandler: ((ScanPhase, Double) -> Void)?
+
+    /// 注入点：hashing 阶段的图像来源与哈希实现。
+    /// 生产构造处传 PhotoKitImageDataProvider + PerceptualHash；
+    /// 默认 nil 使 hashing 阶段空转推进（CI 单测注入假实现覆盖真实路径）。
+    private let imageDataLoader: (String) -> Data?
+    private let hashComputer: (Data) -> String?
+
+    /// fetching 阶段捕获的当轮快照与哈希结果（仅 workQueue 上读写）。
+    private var fetchedRecords: [AssetRecord] = []
+    private var hashByID: [String: String] = [:]
+
+    /// 候选组产出（T05 精比 / T09 评分消费）。镜像受 snapshotLock 保护。
+    private var candidateGroupsSnapshot: [CandidateGroup] = []
+
     /// 仅在 workQueue 上读写。
     private var isDriving = false
 
@@ -35,11 +49,15 @@ final class ScanningEngine: ScanningEngineProtocol {
         photoLibrary: PhotoLibraryServiceProtocol,
         database: PhotoLibraryDatabase,
         store: KeyValueStore,
+        imageDataLoader: @escaping (String) -> Data? = { _ in nil },
+        hashComputer: @escaping (Data) -> String? = { _ in nil },
         workQueue: DispatchQueue = DispatchQueue(label: "com.aiphotoinbox.ScanningEngine", qos: .userInitiated)
     ) {
         self.photoLibrary = photoLibrary
         self.database = database
         self.workQueue = workQueue
+        self.imageDataLoader = imageDataLoader
+        self.hashComputer = hashComputer
         self.machine = ScanStateMachine(store: store)
         publishSnapshot()
     }
@@ -54,6 +72,13 @@ final class ScanningEngine: ScanningEngineProtocol {
         snapshotLock.lock()
         defer { snapshotLock.unlock() }
         return progressSnapshot
+    }
+
+    /// 候选组快照（hashing 阶段产出）。
+    var candidateGroups: [CandidateGroup] {
+        snapshotLock.lock()
+        defer { snapshotLock.unlock() }
+        return candidateGroupsSnapshot
     }
 
     // MARK: ScanningEngineProtocol
@@ -100,6 +125,11 @@ final class ScanningEngine: ScanningEngineProtocol {
             machine.advance()
             publishSnapshot()
         }
+        // 杀进程续跑：hashing 阶段的内存快照随进程消失，重拉元数据重建
+        // （元数据拉取廉价；已算哈希从 featureprints 表复用，见 runHashingStage）。
+        if machine.phase == .hashing && fetchedRecords.isEmpty {
+            fetchedRecords = photoLibrary.fetchAllAssets()
+        }
         guard !isDriving, machine.isActive else { return }
         isDriving = true
         driveUntilInactive()
@@ -124,8 +154,14 @@ final class ScanningEngine: ScanningEngineProtocol {
                     reportProgress()
                     break driveLoop
                 }
-            case .hashing, .embedding, .clustering, .scoring:
-                // TODO(T04/T05/T06/T07): 各阶段真实计算接入后替换占位推进。
+            case .hashing:
+                if !runHashingStage() {
+                    publishSnapshot()
+                    reportProgress()
+                    break driveLoop
+                }
+            case .embedding, .clustering, .scoring:
+                // TODO(T05/T06/T09): 各阶段真实计算接入后替换占位推进。
                 machine.advance()
                 publishSnapshot()
                 reportProgress()
@@ -145,6 +181,8 @@ final class ScanningEngine: ScanningEngineProtocol {
     /// 返回 false 表示中途响应了暂停请求（已 pause、阶段未推进）。
     private func runFetchingStage() -> Bool {
         let assets = photoLibrary.fetchAllAssets()
+        fetchedRecords = assets
+        hashByID = [:]
         let fetchedAt = Date()
         let total = max(assets.count, 1)
         for (index, record) in assets.enumerated() {
@@ -159,6 +197,49 @@ final class ScanningEngine: ScanningEngineProtocol {
                 reportProgress()
             }
         }
+        machine.advance()
+        publishSnapshot()
+        reportProgress()
+        return true
+    }
+
+    /// hashing：逐资产拉缩略图 → 计算 pHash → 落 featureprints 表；
+    /// 阶段末用 (时间×地理×pHash) 产出候选组。无注入实现时空转推进（占位语义保留）。
+    /// 已持久化的当前版本哈希直接复用（杀进程续扫不重算）。
+    private func runHashingStage() -> Bool {
+        for (assetId, hash) in database.allFeatureprintHashes(featureVersion: ScanStateMachine.featureVersion) {
+            hashByID[assetId] = hash
+        }
+
+        let total = max(fetchedRecords.count, 1)
+        for (index, record) in fetchedRecords.enumerated() {
+            if consumePauseRequest() {
+                machine.pause(reason: "用户暂停")
+                return false
+            }
+            if hashByID[record.localIdentifier] == nil,
+               let data = imageDataLoader(record.localIdentifier),
+               let hash = hashComputer(data) {
+                hashByID[record.localIdentifier] = hash
+                database.upsertFeatureprint(
+                    assetId: record.localIdentifier,
+                    data: Data(hash.utf8),
+                    featureVersion: ScanStateMachine.featureVersion,
+                    computedAt: Date()
+                )
+            }
+            machine.setProgress(Double(index + 1) / Double(total))
+            if (index + 1) % 200 == 0 || index + 1 == fetchedRecords.count {
+                publishSnapshot()
+                reportProgress()
+            }
+        }
+
+        let groups = CandidateGrouper.groups(from: fetchedRecords, hashByID: hashByID)
+        snapshotLock.lock()
+        candidateGroupsSnapshot = groups
+        snapshotLock.unlock()
+
         machine.advance()
         publishSnapshot()
         reportProgress()

@@ -30,6 +30,13 @@ struct AssetRecord: Equatable {
     let creationDate: Date?
     /// 是否截屏（截图是强删除候选信号之一）。
     let isScreenshot: Bool
+    /// 是否 Live Photo（含配对视频组件，删除须原子处理，见 T07/T10）。
+    let isLivePhoto: Bool
+    /// 拍摄地纬度（度）；无 GPS 信息时为 nil。仅扫描当轮内存使用（分组），
+    /// 五张表 DDL 无对应列、不落库（tech-spec §4 冻结）。
+    let latitude: Double?
+    /// 拍摄地经度（度）；无 GPS 信息时为 nil。
+    let longitude: Double?
 
     /// 像素总量，供低质量/大文件启发式参考。
     var pixelCount: Int { pixelWidth * pixelHeight }

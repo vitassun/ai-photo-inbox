@@ -21,7 +21,10 @@ final class SafetyRulesTests: XCTestCase {
             pixelHeight: 3024,
             duration: 0,
             creationDate: Date(timeIntervalSince1970: 1_700_000_000),
-            isScreenshot: false
+            isScreenshot: false,
+            isLivePhoto: false,
+            latitude: nil,
+            longitude: nil
         )
     }
 

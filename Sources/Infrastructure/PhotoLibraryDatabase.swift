@@ -209,6 +209,25 @@ final class PhotoLibraryDatabase {
         }
     }
 
+    /// 读回指定版本的全部 pHash（hex 字符串）。供杀进程续扫时复用已算特征，
+    /// 避免整段 hashing 阶段空转重算。
+    func allFeatureprintHashes(featureVersion: Int) -> [String: String] {
+        var result: [String: String] = [:]
+        try? writer.read { db in
+            let rows = try Row.fetchAll(
+                db,
+                sql: "SELECT asset_id, data FROM featureprints WHERE feature_version = ?",
+                arguments: [featureVersion]
+            )
+            for row in rows {
+                if let hex = row["data"] as? Data, let text = String(data: hex, encoding: .utf8) {
+                    result[row["asset_id"] as String] = text
+                }
+            }
+        }
+        return result
+    }
+
     /// 丢弃非当前版本的特征行（ScanStateMachine.FEATURE_VERSION 变更后的脏数据清理）。
     func purgeFeatureprints(keepingFeatureVersion version: Int) {
         try? writer.write { db in
