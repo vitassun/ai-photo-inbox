@@ -88,10 +88,10 @@ final class GroupingTests: XCTestCase {
     }
 
     func testPerceptualHashSmallBrightnessShiftYieldsSmallDistance() {
-        let base: [UInt8] = (0..<32).flatMap { row in
-            (0..<32).map { col -> UInt8 in
-                UInt8(80 + ((row + col) % 4) * 20)
-            }
+        // 用非对称噪声图案（对称条纹会产生大量并列 DCT 系数，中位数附近的
+        // 平局随浮点扰动乱翻，属病态输入）。均匀 +12 只移动 DC 分量，AC 不变。
+        let base: [UInt8] = lcgSequence(seed: 11, count: 32 * 32).map { state in
+            UInt8(128 + Int(state % 17) - 8)   // 128 ± 8
         }
         let shifted: [UInt8] = base.map { pixel in
             let bumped = Int(pixel) + 12
@@ -101,7 +101,7 @@ final class GroupingTests: XCTestCase {
         let hashBase = PerceptualHash.hash(grayPixels: base, width: 32, height: 32)!
         let hashShifted = PerceptualHash.hash(grayPixels: shifted, width: 32, height: 32)!
         let distance = HashDistance.hamming(hexA: hashBase, hexB: hashShifted)!
-        XCTAssertLessThanOrEqual(distance, 16, "轻微亮度扰动不应大幅翻转哈希位，实际 \(distance)")
+        XCTAssertLessThanOrEqual(distance, 8, "轻微亮度扰动不应大幅翻转哈希位，实际 \(distance)")
     }
 
     func testPerceptualHashNoiseDiffersStronglyFromFlat() {

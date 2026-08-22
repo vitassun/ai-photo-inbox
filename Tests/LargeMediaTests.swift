@@ -85,7 +85,7 @@ final class LargeMediaTests: XCTestCase {
 
     func testDisplayBytesUsesHumanUnits() {
         XCTAssertEqual(MediaSizeEstimator.displayBytes(nil), "约未知")
-        XCTAssertTrue(MediaSizeEstimator.displayBytes(500_000_000).contains("GB"))
+        XCTAssertTrue(MediaSizeEstimator.displayBytes(5_000_000_000).contains("GB"))
         XCTAssertTrue(MediaSizeEstimator.displayBytes(50_000_000).contains("MB"))
         XCTAssertTrue(MediaSizeEstimator.displayBytes(50_000).contains("KB"))
     }

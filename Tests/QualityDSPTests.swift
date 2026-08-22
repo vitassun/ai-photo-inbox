@@ -44,15 +44,19 @@ final class QualityDSPTests: XCTestCase {
 
     func testClaritySharpImageScoresAboveBlurredVersion() {
         let side = 32
-        let sharp = noiseGray(side: side, seed: 7)
+        // 低幅噪声（128±6）：保证锐利版方差落在归一化区间内不触顶钳制，
+        // 模糊版单调下降可辨（高幅噪声会双双触顶 1.0 无法区分）。
+        let sharp = noiseGray(side: side, seed: 7).map { pixel in
+            UInt8(122 + Int(pixel % 13))
+        }
         let blurred = boxBlur(sharp, width: side, height: side)
 
         let sharpScore = ImageQualityDSP.clarityScore(grayPixels: sharp, width: side, height: side)!
         let blurredScore = ImageQualityDSP.clarityScore(grayPixels: blurred, width: side, height: side)!
 
         XCTAssertGreaterThan(sharpScore, blurredScore, "同一图案模糊后清晰度必须下降")
+        XCTAssertLessThan(sharpScore, 1.0, "锐利版不应触顶，否则断言失去区分度")
         XCTAssertGreaterThanOrEqual(blurredScore, 0)
-        XCTAssertLessThanOrEqual(sharpScore, 1)
     }
 
     func testClarityFlatImageIsZero() {
