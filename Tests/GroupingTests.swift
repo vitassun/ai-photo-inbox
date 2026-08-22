@@ -88,10 +88,15 @@ final class GroupingTests: XCTestCase {
     }
 
     func testPerceptualHashSmallBrightnessShiftYieldsSmallDistance() {
-        let base = (0..<32).map { row -> [UInt8] in
-            (0..<32).map { col in UInt8(80 + ((row + col) % 4) * 20) }
-        }.flatMap { $0 }
-        let shifted = base.map { min(255, max(0, $0 < 200 ? $0 + 12 : $0)) }
+        let base: [UInt8] = (0..<32).flatMap { row in
+            (0..<32).map { col -> UInt8 in
+                UInt8(80 + ((row + col) % 4) * 20)
+            }
+        }
+        let shifted: [UInt8] = base.map { pixel in
+            let bumped = Int(pixel) + 12
+            return UInt8(min(255, max(0, bumped)))
+        }
 
         let hashBase = PerceptualHash.hash(grayPixels: base, width: 32, height: 32)!
         let hashShifted = PerceptualHash.hash(grayPixels: shifted, width: 32, height: 32)!
