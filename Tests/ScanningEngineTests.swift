@@ -187,8 +187,9 @@ final class ScanningEngineTests: XCTestCase {
         runAndWait(engine, workQueue: queue, progressLog: log)
         XCTAssertEqual(engine.state, .done)
 
-        // 关键契约：续扫不再进 fetching 重拉全库。
-        XCTAssertEqual(fakeService.fetchAllCallCount, 0)
+        // 关键契约：不重进 fetching 阶段（无 fetching 进度回调）；但 T05 起
+        // embedding 聚类需要元数据，bootstrap 会重拉一次重建内存快照。
+        XCTAssertEqual(fakeService.fetchAllCallCount, 1)
 
         // 恢复路径里没有 fetching 阶段的进度回调。
         XCTAssertFalse(log.phases().contains(.fetching))
@@ -242,12 +243,17 @@ final class ScanningEngineTests: XCTestCase {
         previousMachine.setProgress(0.2)
         let persistedHex = String(repeating: "a", count: 16)
         for id in ["asset-0", "asset-1"] {
-            // 特征表有外键，先落父资产行。
+            // 特征表有外键，先落父资产行；哈希经信封编码写入（带类型标记字节）。
             database.upsert(asset: makeRecord(
                 id: id,
                 creationDate: Date(timeIntervalSince1970: 1_700_000_000 + (id == "asset-0" ? 0 : 30))
             ), fetchedAt: Date())
-            database.upsertFeatureprint(assetId: id, data: Data(persistedHex.utf8), featureVersion: 1, computedAt: Date())
+            database.upsertFeatureprint(
+                assetId: id,
+                data: FeaturePrintCodec.encodeHash(persistedHex),
+                featureVersion: 1,
+                computedAt: Date()
+            )
         }
 
         // 新进程：loader 永远返回 nil（模拟图像不可得），只能靠复用已存哈希成组。

@@ -220,8 +220,28 @@ final class PhotoLibraryDatabase {
                 arguments: [featureVersion]
             )
             for row in rows {
-                if let hex = row["data"] as? Data, let text = String(data: hex, encoding: .utf8) {
+                if let data = row["data"] as? Data,
+                   let text = FeaturePrintCodec.decodeHash(data) {
                     result[row["asset_id"] as String] = text
+                }
+            }
+        }
+        return result
+    }
+
+    /// 读回指定版本的全部 embedding（已归一化向量）。供续扫与聚类阶段复用。
+    func allFeatureprintEmbeddings(featureVersion: Int) -> [String: [Double]] {
+        var result: [String: [Double]] = [:]
+        try? writer.read { db in
+            let rows = try Row.fetchAll(
+                db,
+                sql: "SELECT asset_id, data FROM featureprints WHERE feature_version = ?",
+                arguments: [featureVersion]
+            )
+            for row in rows {
+                if let data = row["data"] as? Data,
+                   let vector = FeaturePrintCodec.decodeEmbedding(data) {
+                    result[row["asset_id"] as String] = vector
                 }
             }
         }

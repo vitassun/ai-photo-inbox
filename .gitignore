@@ -11,3 +11,6 @@ DerivedData/
 build/
 *.ipa
 *.dSYM.zip
+
+# T05 阈值回归集：手工标注相册原图与导出向量绝不入库（build-route §6）
+Tools/Regression/dataset/

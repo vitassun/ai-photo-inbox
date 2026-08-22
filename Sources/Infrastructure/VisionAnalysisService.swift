@@ -32,8 +32,50 @@ final class VisionAnalysisService: VisionAnalysisServiceProtocol {
         imageData: Data,
         completion: @escaping (Result<[Double], Error>) -> Void
     ) {
-        // TODO(T05): VNGenerateImageFeaturePrintRequest → observation.featurePrint
-        //   → [Double]（距离用欧氏/余弦，阈值靠回归集调优，见可行性报告 §2.1）。
-        fatalError("TODO(T05): 见任务卡 T05")
+        do {
+            let handler = VNImageRequestHandler(data: imageData, options: [:])
+            let request = VNGenerateImageFeaturePrintRequest()
+            try handler.perform([request])
+            guard let observation = request.results?.first as? VNFeaturePrintObservation else {
+                throw VisionAnalysisError.noObservation
+            }
+            completion(.success(try Self.extractVector(observation)))
+        } catch {
+            completion(.failure(error))
+        }
+    }
+
+    // MARK: 特征向量提取
+
+    enum VisionAnalysisError: Error {
+        case noObservation
+        case unsupportedElementType
+        case emptyFeaturePrint
+    }
+
+    /// VNFeaturePrintObservation → [Double]。公开 API 无逐元素访问器，
+    /// 标准做法是从 data 缓冲按 elementType 整块拷贝
+    /// （float=4 字节/元素，double=8 字节/元素）。
+    static func extractVector(_ observation: VNFeaturePrintObservation) throws -> [Double] {
+        let count = observation.elementCount
+        guard count > 0 else { throw VisionAnalysisError.emptyFeaturePrint }
+        let data = observation.data
+        guard data.count == count * VNElementTypeSize(observation.elementType) else {
+            throw VisionAnalysisError.emptyFeaturePrint
+        }
+        switch observation.elementType {
+        case .float:
+            return data.withUnsafeBytes { raw in
+                let pointer = raw.baseAddress!.assumingMemoryBound(to: Float.self)
+                return UnsafeBufferPointer(start: pointer, count: count).map(Double.init)
+            }
+        case .double:
+            return data.withUnsafeBytes { raw in
+                let pointer = raw.baseAddress!.assumingMemoryBound(to: Double.self)
+                return UnsafeBufferPointer(start: pointer, count: count).map { $0 }
+            }
+        default:
+            throw VisionAnalysisError.unsupportedElementType
+        }
     }
 }

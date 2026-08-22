@@ -18,6 +18,12 @@ enum AppConfig {
     /// 来源：tech-spec §7，业界惯例，待回归集验证。
     static let pHashDuplicateHammingDistance = 8
 
+    /// embedding 聚类距离阈值（L2 归一化向量的欧氏距离，取值域 [0,2]）。
+    /// 初始占位值——回归集（Tools/Regression）校准前仅供 CI 冒烟。
+    /// 注意 tech-spec §3 的 0.045 是 Vision 原生 distance(to:) 量纲，与本值不可混用；
+    /// 校准记录见 Tools/Regression/threshold-log.md，调参必须随脚本与数据留痕。
+    static let embeddingClusterDistanceThreshold = 0.6
+
     /// 特征计算缩略图最大边长（像素）。来源：tech-spec §1 管线输入规格。
     static let thumbnailMaxDimension = 256
 

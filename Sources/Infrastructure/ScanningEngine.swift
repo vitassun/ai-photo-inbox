@@ -34,10 +34,12 @@ final class ScanningEngine: ScanningEngineProtocol {
     /// 默认 nil 使 hashing 阶段空转推进（CI 单测注入假实现覆盖真实路径）。
     private let imageDataLoader: (String) -> Data?
     private let hashComputer: (Data) -> String?
+    private let embeddingComputer: (Data) -> [Double]?
 
-    /// fetching 阶段捕获的当轮快照与哈希结果（仅 workQueue 上读写）。
+    /// fetching 阶段捕获的当轮快照与哈希/向量结果（仅 workQueue 上读写）。
     private var fetchedRecords: [AssetRecord] = []
     private var hashByID: [String: String] = [:]
+    private var embeddingByID: [String: [Double]] = [:]
 
     /// 候选组产出（T05 精比 / T09 评分消费）。镜像受 snapshotLock 保护。
     private var candidateGroupsSnapshot: [CandidateGroup] = []
@@ -51,6 +53,7 @@ final class ScanningEngine: ScanningEngineProtocol {
         store: KeyValueStore,
         imageDataLoader: @escaping (String) -> Data? = { _ in nil },
         hashComputer: @escaping (Data) -> String? = { _ in nil },
+        embeddingComputer: @escaping (Data) -> [Double]? = { _ in nil },
         workQueue: DispatchQueue = DispatchQueue(label: "com.aiphotoinbox.ScanningEngine", qos: .userInitiated)
     ) {
         self.photoLibrary = photoLibrary
@@ -58,6 +61,7 @@ final class ScanningEngine: ScanningEngineProtocol {
         self.workQueue = workQueue
         self.imageDataLoader = imageDataLoader
         self.hashComputer = hashComputer
+        self.embeddingComputer = embeddingComputer
         self.machine = ScanStateMachine(store: store)
         publishSnapshot()
     }
@@ -125,9 +129,11 @@ final class ScanningEngine: ScanningEngineProtocol {
             machine.advance()
             publishSnapshot()
         }
-        // 杀进程续跑：hashing 阶段的内存快照随进程消失，重拉元数据重建
-        // （元数据拉取廉价；已算哈希从 featureprints 表复用，见 runHashingStage）。
-        if machine.phase == .hashing && fetchedRecords.isEmpty {
+        // 杀进程续跑：hashing/embedding/clustering 阶段的内存快照随进程消失，
+        // 重拉元数据重建（元数据拉取廉价；已算特征从 featureprints 表复用，
+        // 见 runHashingStage / runEmbeddingStage）。
+        if machine.phase == .hashing || machine.phase == .embedding || machine.phase == .clustering,
+           fetchedRecords.isEmpty {
             fetchedRecords = photoLibrary.fetchAllAssets()
         }
         guard !isDriving, machine.isActive else { return }
@@ -160,8 +166,20 @@ final class ScanningEngine: ScanningEngineProtocol {
                     reportProgress()
                     break driveLoop
                 }
-            case .embedding, .clustering, .scoring:
-                // TODO(T05/T06/T09): 各阶段真实计算接入后替换占位推进。
+            case .embedding:
+                if !runEmbeddingStage() {
+                    publishSnapshot()
+                    reportProgress()
+                    break driveLoop
+                }
+            case .clustering:
+                if !runClusteringStage() {
+                    publishSnapshot()
+                    reportProgress()
+                    break driveLoop
+                }
+            case .scoring:
+                // TODO(T09): 保留分引擎接线后替换占位推进。
                 machine.advance()
                 publishSnapshot()
                 reportProgress()
@@ -183,6 +201,7 @@ final class ScanningEngine: ScanningEngineProtocol {
         let assets = photoLibrary.fetchAllAssets()
         fetchedRecords = assets
         hashByID = [:]
+        embeddingByID = [:]
         let fetchedAt = Date()
         let total = max(assets.count, 1)
         for (index, record) in assets.enumerated() {
@@ -223,7 +242,7 @@ final class ScanningEngine: ScanningEngineProtocol {
                 hashByID[record.localIdentifier] = hash
                 database.upsertFeatureprint(
                     assetId: record.localIdentifier,
-                    data: Data(hash.utf8),
+                    data: FeaturePrintCodec.encodeHash(hash),
                     featureVersion: ScanStateMachine.featureVersion,
                     computedAt: Date()
                 )
@@ -236,6 +255,85 @@ final class ScanningEngine: ScanningEngineProtocol {
         }
 
         let groups = CandidateGrouper.groups(from: fetchedRecords, hashByID: hashByID)
+        snapshotLock.lock()
+        candidateGroupsSnapshot = groups
+        snapshotLock.unlock()
+
+        machine.advance()
+        publishSnapshot()
+        reportProgress()
+        return true
+    }
+
+    /// embedding：对未被 pHash 组认领的资产计算特征向量（L2 归一化）→ 落表。
+    /// 已持久化的当前版本向量直接复用。无注入实现时空转推进。
+    private func runEmbeddingStage() -> Bool {
+        for (assetId, vector) in database.allFeatureprintEmbeddings(featureVersion: ScanStateMachine.featureVersion) {
+            embeddingByID[assetId] = vector
+        }
+
+        let claimed = Set(candidateGroupsSnapshot.flatMap(\.memberIDs))
+        let pending = fetchedRecords.filter { !claimed.contains($0.localIdentifier) }
+        let total = max(pending.count, 1)
+
+        for (index, record) in pending.enumerated() {
+            if consumePauseRequest() {
+                machine.pause(reason: "用户暂停")
+                return false
+            }
+            if embeddingByID[record.localIdentifier] == nil,
+               let data = imageDataLoader(record.localIdentifier),
+               let rawVector = embeddingComputer(data) {
+                let vector = EmbeddingMath.normalized(rawVector)
+                embeddingByID[record.localIdentifier] = vector
+                database.upsertFeatureprint(
+                    assetId: record.localIdentifier,
+                    data: FeaturePrintCodec.encodeEmbedding(vector),
+                    featureVersion: ScanStateMachine.featureVersion,
+                    computedAt: Date()
+                )
+            }
+            machine.setProgress(Double(index + 1) / Double(total))
+            if (index + 1) % 200 == 0 || index + 1 == pending.count {
+                publishSnapshot()
+                reportProgress()
+            }
+        }
+
+        machine.advance()
+        publishSnapshot()
+        reportProgress()
+        return true
+    }
+
+    /// clustering：在 (时间桶 × 地理单元) 内对 embedding 做阈值连通分量，
+    /// ≥2 成员的分量并入候选组（pHash 已认领的资产不重复进组）。确定性输出。
+    private func runClusteringStage() -> Bool {
+        var groups = candidateGroupsSnapshot
+
+        for unit in CandidateGrouper.timeGeoUnits(from: fetchedRecords) {
+            let claimed = Set(groups.flatMap(\.memberIDs))
+            let members = unit.members.filter {
+                !claimed.contains($0.localIdentifier) && embeddingByID[$0.localIdentifier] != nil
+            }
+            guard members.count >= 2 else { continue }
+
+            let vectors = members.map { member in
+                (id: member.localIdentifier, vector: embeddingByID[member.localIdentifier]!)
+            }
+            for component in EmbeddingClusterer.components(of: vectors) where component.count >= 2 {
+                let ids = Set(component)
+                let groupMembers = members.filter { ids.contains($0.localIdentifier) }
+                groups.append(
+                    CandidateGroup(
+                        id: "cand-\(unit.bucketIndex)-emb-\(groupMembers[0].localIdentifier)",
+                        members: groupMembers,
+                        reason: "时间×地理×embedding"
+                    )
+                )
+            }
+        }
+
         snapshotLock.lock()
         candidateGroupsSnapshot = groups
         snapshotLock.unlock()
