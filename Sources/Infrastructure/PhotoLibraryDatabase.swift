@@ -288,6 +288,16 @@ final class PhotoLibraryDatabase {
         }
     }
 
+    /// 已有分类结论的资产 id 集合（截图子管线续扫去重用）。
+    func screenshotClassificationAssetIds() -> Set<String> {
+        var ids: Set<String> = []
+        try? writer.read { db in
+            let rows = try String.fetchAll(db, sql: "SELECT asset_id FROM screenshot_classifications")
+            ids = Set(rows)
+        }
+        return ids
+    }
+
     /// 丢弃非当前版本的特征行（ScanStateMachine.FEATURE_VERSION 变更后的脏数据清理）。
     func purgeFeatureprints(keepingFeatureVersion version: Int) {
         try? writer.write { db in

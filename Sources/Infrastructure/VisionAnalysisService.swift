@@ -121,6 +121,26 @@ final class VisionAnalysisService: VisionAnalysisServiceProtocol {
         }
     }
 
+    /// 截图 OCR（T11）：.accurate 档，中英双语。同步返回全文拼接；
+    /// 解码失败或无文本返回 nil（调用方落"待定"）。
+    /// 协议刻意不加该方法——截图管线经注入闭包使用，Core 不感知。
+    static func readTextSync(imageData: Data) -> String? {
+        guard let source = CGImageSourceCreateWithData(imageData as CFData, nil),
+              let cgImage = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+            return nil
+        }
+        let request = VNRecognizeTextRequest()
+        request.recognitionLevel = .accurate
+        request.recognitionLanguages = ["zh-Hans", "en-US"]
+        guard (try? VNImageRequestHandler(cgImage: cgImage, options: [:]).perform([request])) != nil,
+              let observations = request.results else {
+            return nil
+        }
+        let lines = observations.compactMap { $0.topCandidates(1).first?.string }
+        let joined = lines.joined(separator: "\n")
+        return joined.isEmpty ? nil : joined
+    }
+
     func computeEmbedding(
         imageData: Data,
         completion: @escaping (Result<[Double], Error>) -> Void
