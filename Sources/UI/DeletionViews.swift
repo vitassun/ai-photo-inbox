@@ -5,6 +5,7 @@
 //        彻底删除永远是用户去系统相册做的动作。
 
 import SwiftUI
+import Photos
 
 /// 待删清单页：展示评分+SafetyRules 过滤后的预删除候选，用户多选后
 /// 触发 requestDelete——真正的删除发生在系统确认框里。
@@ -61,11 +62,18 @@ struct DeletionReviewView: View {
                         selectedIDs.insert(id)
                     }
                 } label: {
-                    HStack {
+                    HStack(spacing: 12) {
                         Image(systemName: selectedIDs.contains(id) ? "checkmark.circle.fill" : "circle")
-                        Text(id)
-                            .font(.caption)
-                            .lineLimit(1)
+                            .foregroundStyle(selectedIDs.contains(id) ? Color.accentColor : .secondary)
+                        AssetThumbnailView(localIdentifier: id)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("待确认候选")
+                                .font(.subheadline)
+                            Text(id)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
                         Spacer()
                     }
                 }
@@ -101,6 +109,62 @@ struct DeletionReviewView: View {
             } else {
                 statusText = "未执行删除\(error.map { "：\($0.localizedDescription)" } ?? "。")可重试。"
             }
+        }
+    }
+}
+
+/// 资产缩略图：按 localIdentifier 从 PhotoKit 拉小图（只读，不触发 iCloud 下载）。
+struct AssetThumbnailView: View {
+    let localIdentifier: String
+
+    @State private var image: UIImage?
+    @State private var failed = false
+
+    var body: some View {
+        Group {
+            if let image {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFill()
+            } else if failed {
+                ZStack {
+                    Rectangle().fill(Color(.systemGray5))
+                    Image(systemName: "photo.badge.exclamationmark")
+                        .foregroundStyle(.secondary)
+                }
+            } else {
+                ZStack {
+                    Rectangle().fill(Color(.systemGray5))
+                    ProgressView()
+                }
+            }
+        }
+        .frame(width: 56, height: 56)
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+        .onAppear(perform: load)
+    }
+
+    private func load() {
+        guard image == nil, !failed else { return }
+        DispatchQueue.global(qos: .userInitiated).async {
+            guard let asset = PHAsset.fetchAssets(
+                withLocalIdentifiers: [localIdentifier], options: nil
+            ).firstObject else {
+                DispatchQueue.main.async { self.failed = true }
+                return
+            }
+            let options = PHImageRequestOptions()
+            options.deliveryMode = .fastFormat
+            options.isNetworkAccessAllowed = false   // iCloud 未下载资产显示占位，不触发下载
+            options.isSynchronous = true
+            // 2x of 56pt 显示尺寸。
+            let thumbnail = PHImageManager.default().requestImage(
+                for: asset,
+                targetSize: CGSize(width: 112, height: 112),
+                contentMode: .aspectFill,
+                options: options
+            ) { delivered, _ in delivered }
+            DispatchQueue.main.async { self.image = thumbnail }
         }
     }
 }
