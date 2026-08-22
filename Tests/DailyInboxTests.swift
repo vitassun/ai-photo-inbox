@@ -119,7 +119,9 @@ final class DailyNotificationContentTests: XCTestCase {
     }
 
     func testTriggerSurvivesDSTSpringForward() throws {
-        // 纽约 2026-03-08 02:00 春季拨快：02:30 不存在——日历算术应自行折算不崩。
+        // 纽约 2026-03-08 02:00 春季拨快：02:30 本地不存在。
+        // Calendar 的折算规则：向前取当天存在的最近时刻 → 当天 3:30 EDT，
+        // 不崩、不落到不存在的时刻——这就是要锁定的行为。
         var newYork = Calendar(identifier: .gregorian)
         newYork.timeZone = TimeZone(identifier: "America/New_York")!
         let beforeJump = try XCTUnwrap(newYork.date(from: DateComponents(
@@ -130,8 +132,8 @@ final class DailyNotificationContentTests: XCTestCase {
             after: beforeJump, hour: 2, minute: 30, calendar: newYork
         ))
         let comps = newYork.dateComponents([.day, .hour, .minute], from: trigger)
-        XCTAssertEqual(comps.day, 9, "当天 2:30 不存在，顺延到明天")
-        XCTAssertEqual(comps.hour, 2)
+        XCTAssertEqual(comps.day, 8)
+        XCTAssertEqual(comps.hour, 3, "不存在的 2:30 折算为当天 3:30（拨快后的下一真实时刻）")
         XCTAssertEqual(comps.minute, 30)
     }
 }
