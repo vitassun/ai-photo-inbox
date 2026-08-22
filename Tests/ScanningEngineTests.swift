@@ -257,16 +257,12 @@ final class ScanningEngineTests: XCTestCase {
         }
 
         // 新进程：loader 永远返回 nil（模拟图像不可得），只能靠复用已存哈希成组。
-        var loaderCalledIDs: [String] = []
         let fakeService = FakePhotoLibraryService(records: makeRecords(4))
         let engine = ScanningEngine(
             photoLibrary: fakeService,
             database: database,
             store: store,
-            imageDataLoader: { id in
-                loaderCalledIDs.append(id)
-                return nil
-            },
+            imageDataLoader: { _ in nil },
             hashComputer: { _ in nil },
             workQueue: queue
         )
@@ -277,8 +273,17 @@ final class ScanningEngineTests: XCTestCase {
 
         XCTAssertEqual(engine.state, .done)
         XCTAssertEqual(fakeService.fetchAllCallCount, 1, "续跑时重拉一次元数据重建内存快照")
-        XCTAssertFalse(loaderCalledIDs.contains("asset-0"), "已存哈希的资产不再重算")
-        XCTAssertFalse(loaderCalledIDs.contains("asset-1"), "已存哈希的资产不再重算")
+
+        // 哈希复用的本质断言：持久化哈希未被覆盖（hashing 阶段没有重算）。
+        // 注：T09 起 scoring 阶段会为缺分数的资产再调 loader，属正常路径。
+        XCTAssertEqual(
+            database.allFeatureprintHashes(featureVersion: 1)["asset-0"],
+            persistedHex
+        )
+        XCTAssertEqual(
+            database.allFeatureprintHashes(featureVersion: 1)["asset-1"],
+            persistedHex
+        )
 
         // 候选组从持久化哈希正确产出。
         XCTAssertEqual(engine.candidateGroups.count, 1)
