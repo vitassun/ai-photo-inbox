@@ -10,6 +10,7 @@ struct DailyInboxView: View {
     @State private var summary: DailyInboxSummary?
     @State private var authStatus: PhotoAuthorizationStatus = .notDetermined
     @State private var accessPromptShown = false
+    @State private var scanStatusText: String?
 
     var body: some View {
         NavigationStack {
@@ -61,10 +62,9 @@ struct DailyInboxView: View {
 
             switch authStatus {
             case .authorized, .limited:
-                Button("开始 / 继续扫描") {
-                    environment.engine.runFullScan { _, _ in }
-                }
-                .buttonStyle(.bordered)
+                Button("开始 / 继续扫描") { startScan() }
+                    .buttonStyle(.bordered)
+                    .disabled(scanStatusText?.contains("中") == true)
             case .notDetermined:
                 Button("授权相册访问，开始整理") { promptAccess() }
                     .buttonStyle(.borderedProminent)
@@ -73,6 +73,17 @@ struct DailyInboxView: View {
                     environment.photoLibraryService.openSystemSettings()
                 }
                 .buttonStyle(.bordered)
+            }
+
+            if let scanStatusText {
+                HStack(spacing: 8) {
+                    if scanStatusText.hasSuffix("中…") || scanStatusText.contains("读取") ||
+                        scanStatusText.contains("指纹") || scanStatusText.contains("聚类") ||
+                        scanStatusText.contains("评分") || scanStatusText.contains("嵌入") {
+                        ProgressView()
+                    }
+                    Text(scanStatusText).font(.footnote)
+                }
             }
 
             if authStatus == .authorized || authStatus == .limited {
@@ -118,6 +129,37 @@ struct DailyInboxView: View {
         // 回调保证主线程（SystemPhotoLibraryService 实现方切换）。
         environment.photoLibraryService.requestAccess { _ in
             self.refresh()
+        }
+    }
+
+    private func startScan() {
+        scanStatusText = "启动中…"
+        environment.engine.runFullScan { [self] phase, progress in
+            // 引擎在工作队列回调 → 切主线程更新 UI。
+            DispatchQueue.main.async {
+                if phase == .done {
+                    self.scanStatusText = "扫描完成 ✓"
+                    self.summary = self.environment.todaySummary()
+                } else if case .paused = phase {
+                    self.scanStatusText = "已暂停（可点按钮继续）"
+                } else {
+                    let name = Self.phaseLabel(phase)
+                    self.scanStatusText = "\(name) \(Int((progress * 100).rounded()))%…"
+                }
+            }
+        }
+    }
+
+    private static func phaseLabel(_ phase: ScanPhase) -> String {
+        switch phase {
+        case .idle: return "待机"
+        case .fetching: return "读取相册"
+        case .hashing: return "计算指纹"
+        case .embedding: return "特征嵌入"
+        case .clustering: return "相似聚类"
+        case .scoring: return "评分排序"
+        case .done: return "完成"
+        case .paused(let reason): return "暂停（\(reason)）"
         }
     }
 }
