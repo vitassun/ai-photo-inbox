@@ -107,6 +107,18 @@ final class VisionAnalysisService: VisionAnalysisServiceProtocol {
         return luma
     }
 
+    func computePerceptualHash(
+        imageData: Data,
+        completion: @escaping (Result<String, Error>) -> Void
+    ) {
+        // 实现体在 PerceptualHash（T04 的自实现 DCT pHash，纯函数核心）。
+        if let hash = PerceptualHash.hash(fromEncodedImageData: imageData) {
+            completion(.success(hash))
+        } else {
+            completion(.failure(VisionAnalysisError.imageDecodeFailed))
+        }
+    }
+
     func computeEmbedding(
         imageData: Data,
         completion: @escaping (Result<[Double], Error>) -> Void
