@@ -56,9 +56,11 @@ final class VisionAnalysisService: VisionAnalysisServiceProtocol {
 
         // saliency：注意力显著性最高置信度。
         if let request = try? VNGenerateAttentionBasedSaliencyImageRequest(),
-           (try? handler.perform([request])) != nil {
-            let observation = request.results?.first as? VNSaliencyImageObservation
-            saliency = observation?.salientObjects.map(\.confidence).max().map(Double.init)
+           (try? handler.perform([request])) != nil,
+           let observation = request.results?.first as? VNSaliencyImageObservation {
+            // 注意先解包再 map——`obs?.x.map(\.y)` 会把 keypath 喂给 Optional.map。
+            let confidences = observation.salientObjects.map { Double($0.confidence) }
+            saliency = confidences.max()
         }
 
         // aesthetics：iOS18 美学总分 [-1,1] → [0,1]。模拟器不支持 → 保持 nil → 中性值。
