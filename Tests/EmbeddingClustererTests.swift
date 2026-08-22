@@ -190,14 +190,18 @@ final class ScanningEngineFullChainTests: XCTestCase {
             },
             hashComputer: { _ in nil },          // pHash 不可用 → 全部走 embedding 精比
             embeddingComputer: { data in
-                // 位置加权校验和构造可区分向量：同图同向量、异图异向量
-                // （不能用首字节——所有 JPEG 都以 0xFF 开头；加权把意外碰撞
-                // 压到可忽略）。
-                var checksum = 0
+                // 双混叠哈希构造可区分向量：同图同向量；异图的两个高方差
+                // 维度使归一化后的方向差异远超阈值。（首字节全是 0xFF 不可用；
+                // 单一大数维度归一化后会贴轴导致异图也"相似"。）
+                var hash1 = 5381
+                var hash2 = 52711
                 for (index, byte) in data.prefix(8192).enumerated() {
-                    checksum &+= Int(byte) * (index % 7 + 1)
+                    hash1 = (hash1 &* 33 &+ Int(byte)) % 1_000_003
+                    if index % 2 == 0 {
+                        hash2 = (hash2 &* 31 &+ Int(byte)) % 1_000_003
+                    }
                 }
-                return [Double(checksum), 1.0, 0.5]
+                return [Double(hash1), Double(hash2), 1.0]
             },
             workQueue: queue
         )
