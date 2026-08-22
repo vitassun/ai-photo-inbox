@@ -118,7 +118,7 @@ struct DeletionReviewView: View {
         } label: {
             VStack(spacing: 4) {
                 ZStack(alignment: .topLeading) {
-                    AssetThumbnailView(localIdentifier: id, side: 84)
+                    AssetThumbnailView(side: 84, localIdentifier: id)
                         .overlay(
                             RoundedRectangle(cornerRadius: 8)
                                 .stroke(selected ? Color.red : Color.clear, lineWidth: 2.5)
