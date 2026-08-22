@@ -165,7 +165,7 @@ final class ResilientLLMClient: LLMClientProtocol {
 
     func classifyScreenshot(ocrText: String) async throws -> LLMClassification {
         guard isLiveMode() else {
-            return mock.classifyScreenshot(ocrText: ocrText)
+            return try await mock.classifyScreenshot(ocrText: ocrText)
         }
         do {
             return try await remote.classifyScreenshot(ocrText: ocrText)
