@@ -74,4 +74,11 @@ enum AppConfig {
 
     /// 超长视频时长钳制（秒），防溢出式估算。
     static let videoDurationCapSeconds = 4 * 3600.0
+
+    // MARK: T13 LLM 兜底客户端
+
+    /// 单次请求超时（秒）。降级铁律：超时/非 200/解析失败/断网一律回落纯规则。
+    static let llmTimeoutSeconds: TimeInterval = 8
+    /// 重试上限（至多 1 次重试，即最多 2 次请求）。
+    static let llmMaxRetries = 1
 }
