@@ -22,6 +22,7 @@ struct DeletionReviewView: View {
     @State private var selectedIDs: Set<String> = []
     @State private var isDeleting = false
     @State private var statusText: String?
+    @State private var viewerContext: ViewerContext?
 
     private var displayableGroups: [ScoredGroup] {
         candidates.filter { !$0.preselectableIDs.isEmpty }
@@ -56,6 +57,13 @@ struct DeletionReviewView: View {
             .padding(.vertical, 8)
         }
         .navigationTitle("待删清单")
+        .fullScreenCover(item: $viewerContext) { context in
+            GroupPhotoViewer(
+                group: context.group,
+                startIndex: context.startIndex,
+                selectedIDs: $selectedIDs
+            )
+        }
     }
 
     private var groupedList: some View {
@@ -65,8 +73,8 @@ struct DeletionReviewView: View {
                     Section {
                         ScrollView(.horizontal, showsIndicators: false) {
                             HStack(alignment: .top, spacing: 12) {
-                                ForEach(group.members, id: \.record.localIdentifier) { member in
-                                    memberCard(member, group: group)
+                                ForEach(Array(group.members.enumerated()), id: \.element.record.localIdentifier) { index, member in
+                                    memberCard(member, group: group, index: index)
                                 }
                             }
                             .padding(.vertical, 6)
@@ -75,7 +83,7 @@ struct DeletionReviewView: View {
                         HStack {
                             Text("\(shortGroupLabel(group)) · 共 \(group.members.count) 张")
                             Spacer()
-                            Button("全选本组") {
+                            Button("全选建议") {
                                 selectedIDs.formUnion(group.preselectableIDs)
                             }
                             .font(.caption)
@@ -101,53 +109,67 @@ struct DeletionReviewView: View {
         }
     }
 
-    /// 组内成员卡片：缩略图 + 勾选态；Best Shot 星标且永不可选（红线）。
-    private func memberCard(_ member: ScoredMember, group: ScoredGroup) -> some View {
+    /// 组内成员卡片：点卡片开全屏原图查看器；右下角小圆钮直接勾选/取消。
+    /// 所有成员（含 ★ 最佳）都可手动勾选——红线只约束"自动预选"，
+    /// 用户亲手勾选并经系统确认框属于最终决定权；★ 默认不勾。
+    private func memberCard(_ member: ScoredMember, group: ScoredGroup, index: Int) -> some View {
         let id = member.record.localIdentifier
-        let selectable = group.preselectableIDs.contains(id)
+        let suggested = group.preselectableIDs.contains(id)
         let selected = selectedIDs.contains(id)
 
-        return Button {
-            if selectable {
-                if selected {
-                    selectedIDs.remove(id)
-                } else {
-                    selectedIDs.insert(id)
+        return VStack(spacing: 4) {
+            ZStack(alignment: .topLeading) {
+                AssetThumbnailView(side: 84, localIdentifier: id)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8)
+                            .stroke(selected ? Color.red : Color.clear, lineWidth: 2.5)
+                    )
+
+                if member.isBestShot {
+                    Image(systemName: "star.fill")
+                        .font(.caption)
+                        .foregroundStyle(.yellow)
+                        .padding(4)
+                        .background(.ultraThinMaterial, in: Circle())
                 }
             }
-        } label: {
-            VStack(spacing: 4) {
-                ZStack(alignment: .topLeading) {
-                    AssetThumbnailView(side: 84, localIdentifier: id)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 8)
-                                .stroke(selected ? Color.red : Color.clear, lineWidth: 2.5)
-                        )
-                        .opacity(selectable || selected ? 1 : 0.45)
-
-                    if member.isBestShot {
-                        Image(systemName: "star.fill")
-                            .font(.caption)
-                            .foregroundStyle(.yellow)
-                            .padding(4)
-                            .background(.ultraThinMaterial, in: Circle())
-                    }
-
-                    if selected {
-                        Image(systemName: "checkmark.circle.fill")
-                            .font(.title3)
-                            .symbolRenderingMode(.palette)
-                            .foregroundStyle(.white, .red)
-                            .transition(.scale)
-                    }
+            .overlay(alignment: .bottomTrailing) {
+                Button {
+                    toggleSelection(id)
+                } label: {
+                    Image(systemName: selected ? "checkmark.circle.fill" : "circle")
+                        .font(.title3)
+                        .symbolRenderingMode(.palette)
+                        .foregroundStyle(.white, selected ? .red : .gray)
+                        .shadow(radius: 2)
                 }
-                Text(member.isBestShot ? "★ 最佳" : String(format: "分 %.2f", member.score))
+                .padding(4)
+            }
+
+            HStack(spacing: 4) {
+                if member.isBestShot {
+                    Text("★最佳").font(.caption2).foregroundStyle(.yellow)
+                }
+                if suggested {
+                    Text("建议删").font(.caption2).foregroundStyle(.red)
+                }
+                Text(String(format: "%.2f", member.score))
                     .font(.caption2)
-                    .foregroundStyle(selectable ? .primary : .secondary)
+                    .foregroundStyle(.secondary)
             }
         }
-        .buttonStyle(.plain)
-        .disabled(!selectable)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            viewerContext = ViewerContext(group: group, startIndex: index)
+        }
+    }
+
+    private func toggleSelection(_ id: String) {
+        if selectedIDs.contains(id) {
+            selectedIDs.remove(id)
+        } else {
+            selectedIDs.insert(id)
+        }
     }
 
     private func shortGroupLabel(_ group: ScoredGroup) -> String {
@@ -169,6 +191,148 @@ struct DeletionReviewView: View {
             } else {
                 statusText = "未执行删除\(error.map { "：\($0.localizedDescription)" } ?? "。")可重试。"
             }
+        }
+    }
+}
+
+/// 全屏原图查看器：左右滑动浏览组内成员，滑动到哪张就能直接勾选哪张。
+struct ViewerContext: Identifiable {
+    let id = UUID()
+    let group: ScoredGroup
+    let startIndex: Int
+}
+
+struct GroupPhotoViewer: View {
+    let group: ScoredGroup
+    @State private var currentIndex: Int
+    @Binding var selectedIDs: Set<String>
+    @Environment(\.dismiss) private var dismiss
+
+    init(group: ScoredGroup, startIndex: Int, selectedIDs: Binding<Set<String>>) {
+        self.group = group
+        _currentIndex = State(initialValue: startIndex)
+        _selectedIDs = selectedIDs
+    }
+
+    private var currentMember: ScoredMember? {
+        group.members.indices.contains(currentIndex) ? group.members[currentIndex] : nil
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text("第 \(min(currentIndex + 1, group.members.count)) / \(group.members.count) 张")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button("完成") { dismiss() }
+            }
+            .padding(.horizontal)
+            .padding(.vertical, 8)
+
+            TabView(selection: $currentIndex) {
+                ForEach(Array(group.members.enumerated()), id: \.element.record.localIdentifier) { _, member in
+                    FullPhotoView(localIdentifier: member.record.localIdentifier)
+                        .tag(group.members.firstIndex { $0.record.localIdentifier == member.record.localIdentifier } ?? 0)
+                }
+            }
+            .tabViewStyle(.page(indexDisplayMode: .never))
+            .indexViewStyle(.page(backgroundDisplayMode: .always))
+
+            if let member = currentMember {
+                bottomBar(member)
+            }
+        }
+        .background(Color(.systemBackground))
+    }
+
+    private func bottomBar(_ member: ScoredMember) -> some View {
+        let id = member.record.localIdentifier
+        let selected = selectedIDs.contains(id)
+
+        return HStack {
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    if member.isBestShot {
+                        Text("★ 最佳").font(.footnote).foregroundStyle(.yellow)
+                    }
+                    if group.preselectableIDs.contains(id) {
+                        Text("建议删").font(.footnote).foregroundStyle(.red)
+                    }
+                    Text(String(format: "保留分 %.2f", member.score))
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+                Text(id).font(.caption2).foregroundStyle(.tertiary).lineLimit(1)
+            }
+            Spacer()
+            Button {
+                if selected {
+                    selectedIDs.remove(id)
+                } else {
+                    selectedIDs.insert(id)
+                }
+            } label: {
+                Text(selected ? "✓ 已选中（点此取消）" : "选中此张")
+                    .font(.subheadline.bold())
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
+                    .background(selected ? Color.red.opacity(0.15) : Color.accentColor.opacity(0.15),
+                                in: Capsule())
+                    .foregroundStyle(selected ? .red : .accentColor)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding()
+    }
+}
+
+/// 单页大图：按屏幕级尺寸从 PhotoKit 拉取（只读，iCloud 未下载不触发下载）。
+struct FullPhotoView: View {
+    let localIdentifier: String
+
+    @State private var image: UIImage?
+    @State private var failed = false
+
+    var body: some View {
+        ZStack {
+            Color(.systemGray6)
+            if let image {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFit()
+            } else if failed {
+                Image(systemName: "photo.badge.exclamationmark")
+                    .font(.largeTitle)
+                    .foregroundStyle(.secondary)
+            } else {
+                ProgressView()
+            }
+        }
+        .onAppear(perform: load)
+    }
+
+    private func load() {
+        guard image == nil, !failed else { return }
+        DispatchQueue.global(qos: .userInitiated).async {
+            guard let asset = PHAsset.fetchAssets(
+                withLocalIdentifiers: [localIdentifier], options: nil
+            ).firstObject else {
+                DispatchQueue.main.async { self.failed = true }
+                return
+            }
+            let options = PHImageRequestOptions()
+            options.deliveryMode = .highQualityFormat
+            options.isNetworkAccessAllowed = false
+            options.isSynchronous = true
+            var delivered: UIImage?
+            PHImageManager.default().requestImage(
+                for: asset,
+                targetSize: CGSize(width: 1600, height: 1600),
+                contentMode: .aspectFit,
+                options: options
+            ) { img, _ in delivered = img }
+            DispatchQueue.main.async { self.image = delivered }
         }
     }
 }
