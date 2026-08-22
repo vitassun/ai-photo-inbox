@@ -46,8 +46,10 @@ enum TaskExtractor {
 
     /// 单号形态：2 位大写字母 + 12–15 位数字（SF/YT/ZT…），或纯 12–15 位数字。
     /// 易混字符 O/I/Q 不出现在合法单号字母位——正则天然排除。
+    /// 用数字环视而非 \b：中文紧邻单号时（"...90123已揽收"）CJK 也算
+    /// ICU 词字符，\b 不成立。环视只排除"还连着更多数字"的情形。
     private static let trackingPattern = try! NSRegularExpression(
-        pattern: #"\b[A-Z]{2}[0-9]{12,15}\b|\b[0-9]{13,15}\b"#
+        pattern: #"(?<![0-9])[A-Z]{2}[0-9]{12,15}(?![0-9])|(?<![0-9])[0-9]{13,15}(?![0-9])"#
     )
 
     static func extractTrackingNo(_ rawText: String) -> String? {
