@@ -49,7 +49,7 @@ enum ScreenshotRuleClassifier {
 
     /// 快递单号形态：2 字母开头 + 12–15 位数字，或纯 13–15 位数字串。
     private static let trackingPattern = try! NSRegularExpression(
-        pattern: #"(?<![0-9])[A-Z]{2}\d{12,15}(?![0-9])|(?<![0-9])\d{13,15}(?![0-9])"#
+        pattern: #"(?<![0-9A-Z])[A-HJ-NP-Z]{2}\d{12,15}(?![0-9])|(?<![0-9])\d{13,15}(?![0-9])"#
     )
 
     // MARK: 主入口
