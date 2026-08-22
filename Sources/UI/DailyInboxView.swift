@@ -114,9 +114,10 @@ struct DailyInboxView: View {
     }
 
     private func promptAccess() {
-        environment.photoLibraryService.requestAccess { [weak self] _ in
-            // 回调已在主线程（实现方保证）；授权完成后整页状态刷新。
-            self?.refresh()
+        // View 是 struct：值捕获即可，@State 写入经共享存储仍然生效；
+        // 回调保证主线程（SystemPhotoLibraryService 实现方切换）。
+        environment.photoLibraryService.requestAccess { _ in
+            self.refresh()
         }
     }
 }
