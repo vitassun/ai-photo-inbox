@@ -109,12 +109,16 @@ final class ScanningEngine: ScanningEngineProtocol {
             for scored in self.scoredGroupsSnapshot {
                 let remaining = scored.members.filter { !deleted.contains($0.record.localIdentifier) }
                 guard remaining.count >= 2 else { continue }
-                let bestShotID = scored.bestShot?.record.localIdentifier
+                // 旧 Best Shot 被删除时，把标记移交给剩余成员的首位（成员本就按分排序）。
+                let oldBestID = scored.bestShot?.record.localIdentifier
+                let newBestID = (oldBestID != nil && !deleted.contains(oldBestID!))
+                    ? oldBestID
+                    : remaining.first?.record.localIdentifier
                 let rebuiltMembers = remaining.map { member -> ScoredMember in
                     ScoredMember(
                         record: member.record,
                         score: member.score,
-                        isBestShot: member.record.localIdentifier == bestShotID
+                        isBestShot: member.record.localIdentifier == newBestID
                     )
                 }
                 let remainingIDs = Set(remaining.map(\.record.localIdentifier))
