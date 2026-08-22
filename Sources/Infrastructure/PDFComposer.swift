@@ -51,7 +51,7 @@ enum PDFComposer {
 
     /// 页数校验辅助：经 CGPDFDocument 解析页数。仅用于测试断言；生产路径不依赖它。
     static func pageCount(in pdfData: Data) -> Int {
-        guard let provider = CGDataProvider(pdfData as CFData),
+        guard let provider = CGDataProvider(data: pdfData as CFData),
               let document = CGPDFDocument(provider) else { return 0 }
         return document.numberOfPages
     }
