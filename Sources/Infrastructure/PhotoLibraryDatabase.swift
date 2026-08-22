@@ -267,6 +267,27 @@ final class PhotoLibraryDatabase {
         return result
     }
 
+    /// 删除完成后批量落 verdicts（T10：verdict='delete'，reason 记录来源）。
+    /// 资产行若已随删除清理（外键级联）则对应 decisions 行也级联消失——
+    /// 本方法对仍存在的资产行写入裁决，供审计与"删除后立即重扫不产生幽灵条目"。
+    func markDeleted(assetIds: [String], at date: Date = Date()) {
+        for assetId in assetIds {
+            try? writer.write { db in
+                try db.execute(
+                    sql: """
+                    INSERT INTO decisions (asset_id, verdict, reason, decided_at)
+                    VALUES (?, 'delete', 'user_approved_system_confirm', ?)
+                    ON CONFLICT(asset_id) DO UPDATE SET
+                      verdict = excluded.verdict,
+                      reason = excluded.reason,
+                      decided_at = excluded.decided_at
+                    """,
+                    arguments: [assetId, date.timeIntervalSince1970]
+                )
+            }
+        }
+    }
+
     /// 丢弃非当前版本的特征行（ScanStateMachine.FEATURE_VERSION 变更后的脏数据清理）。
     func purgeFeatureprints(keepingFeatureVersion version: Int) {
         try? writer.write { db in

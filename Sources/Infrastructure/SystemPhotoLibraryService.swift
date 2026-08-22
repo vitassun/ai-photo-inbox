@@ -115,11 +115,40 @@ final class SystemPhotoLibraryService: PhotoLibraryServiceProtocol {
         of identifiers: [String],
         completion: @escaping (Bool, Error?) -> Void
     ) {
-        // TODO(T10): PHPhotoLibrary.shared().performChanges {
-        //   PHAssetChangeRequest.deleteAssets(assets as NSArray)
-        // } —— 系统确认框是产品红线的一部分，不是障碍。
-        // 调用方必须已过 SafetyRules 过滤；本方法不做二次红线校验（职责在 Core 层）。
-        fatalError("TODO(T10): 见任务卡 T10")
+        // 唯一删除通道：performChanges + deleteAssets，系统弹确认框由用户逐次批准。
+        // 超上限自动分批（T10），按批顺序执行；任一批失败（含用户取消确认框）
+        // 即停止后续批次——续传语义：调用方以 fetchAssets(matching:) 重查
+        // 幸存者后重试，已删者自然消失。
+        DispatchQueue.global(qos: .userInitiated).async {
+            let error = DeletionFlow.runBatches(identifiers) { batch, _ in
+                let semaphore = DispatchSemaphore(value: 0)
+                var batchError: Error?
+
+                PHPhotoLibrary.shared().performChanges {
+                    let assets = PHAsset.fetchAssets(withLocalIdentifiers: batch, options: nil)
+                    let objects = assets.objects(at: IndexSet(integersIn: 0..<assets.count))
+                    PHAssetChangeRequest.deleteAssets(objects as NSArray)
+                } completionHandler: { success, changeError in
+                    // 用户在确认框点取消 → success=false + PHPhotoLibraryError.userCancelled，
+                    // 同样走失败路径：零删除发生、调用方可重试（T10 验收的拒绝路径）。
+                    batchError = success ? nil : (changeError ?? DeletionError.changeRequestFailed)
+                    semaphore.signal()
+                }
+                semaphore.wait()
+
+                if let batchError {
+                    throw batchError
+                }
+            }
+
+            DispatchQueue.main.async {
+                completion(error == nil, error)
+            }
+        }
+    }
+
+    enum DeletionError: Error {
+        case changeRequestFailed
     }
 
     // MARK: 纯函数层（CI 单测覆盖）

@@ -89,6 +89,45 @@ final class ScanningEngine: ScanningEngineProtocol {
         return progressSnapshot
     }
 
+    /// 删除完成后刷新内存视图（T10）：从候选组与评分视图里移除已删 id，
+    /// 成员数跌破 2 的组随之解散。须在 workQueue 上调用（经 enqueue 包装）。
+    func purgeDeletedFromViews(assetIds: [String], completion: (() -> Void)? = nil) {
+        workQueue.async { [weak self] in
+            guard let self else { return }
+            let deleted = Set(assetIds)
+
+            var keptGroups: [CandidateGroup] = []
+            for group in self.candidateGroupsSnapshot {
+                let remaining = group.members.filter { !deleted.contains($0.localIdentifier) }
+                if remaining.count >= 2 { keptGroups.append(group) }
+            }
+            self.candidateGroupsSnapshot = keptGroups
+
+            var keptScored: [ScoredGroup] = []
+            for scored in self.scoredGroupsSnapshot {
+                let remaining = scored.members.filter { !deleted.contains($0.record.localIdentifier) }
+                guard remaining.count >= 2 else { continue }
+                let bestShotID = scored.bestShot?.record.localIdentifier
+                let rebuiltMembers = remaining.map { member -> ScoredMember in
+                    ScoredMember(
+                        record: member.record,
+                        score: member.score,
+                        isBestShot: member.record.localIdentifier == bestShotID
+                    )
+                }
+                let remainingIDs = Set(remaining.map(\.record.localIdentifier))
+                keptScored.append(ScoredGroup(
+                    groupID: scored.groupID,
+                    reason: scored.reason,
+                    members: rebuiltMembers,
+                    preselectableIDs: scored.preselectableIDs.filter { remainingIDs.contains($0) && !deleted.contains($0) }
+                ))
+            }
+            self.scoredGroupsSnapshot = keptScored
+            completion?()
+        }
+    }
+
     /// 候选组快照（hashing/clustering 阶段产出）。
     var candidateGroups: [CandidateGroup] {
         snapshotLock.lock()
