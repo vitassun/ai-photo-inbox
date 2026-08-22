@@ -44,6 +44,15 @@ jobs:
           fi
           echo "Core layer clean: no PhotoKit imports"
 
+      - name: Assert SafetyRules.validateRedLines is wired at launch (T09)
+        run: |
+          # 存在性检查：启动路径必须调用红线断言（任务卡 T09 验收）
+          grep -q "SafetyRules.validateRedLines()" Sources/AppRoot.swift || {
+            echo "::error::App 启动路径缺少 SafetyRules.validateRedLines() 调用"
+            exit 1
+          }
+          echo "launch-time red-line check wired"
+
       - name: List available simulators (debug aid)
         run: xcrun simctl list devices available | head -n 30
 

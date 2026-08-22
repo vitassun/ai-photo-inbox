@@ -7,6 +7,11 @@ import SwiftUI
 
 @main
 struct AIPhotoInboxApp: App {
+    init() {
+        // 启动期红线断言（T09）：常量被篡改会在 Debug 构建直接崩在启动期。
+        SafetyRules.validateRedLines()
+    }
+
     var body: some Scene {
         WindowGroup {
             ContentView()

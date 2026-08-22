@@ -35,14 +35,21 @@ final class ScanningEngine: ScanningEngineProtocol {
     private let imageDataLoader: (String) -> Data?
     private let hashComputer: (Data) -> String?
     private let embeddingComputer: (Data) -> [Double]?
+    /// scoring 阶段的四维特征来源（T08 analyze 的注入点）。
+    private let featureAnalyzer: (Data) -> VisionAnalysisResult?
+    /// 冷启动开关（V1 无反馈历史恒 false → favoriteBoost 翻倍；反馈历史属 T14 后）。
+    private let hasUserData: Bool
 
     /// fetching 阶段捕获的当轮快照与哈希/向量结果（仅 workQueue 上读写）。
     private var fetchedRecords: [AssetRecord] = []
     private var hashByID: [String: String] = [:]
     private var embeddingByID: [String: [Double]] = [:]
+    private var scoresByID: [String: VisionAnalysisResult] = [:]
 
     /// 候选组产出（T05 精比 / T09 评分消费）。镜像受 snapshotLock 保护。
     private var candidateGroupsSnapshot: [CandidateGroup] = []
+    /// 评分后的组视图（Best Shot / 预删除候选集）。镜像受 snapshotLock 保护。
+    private var scoredGroupsSnapshot: [ScoredGroup] = []
 
     /// 仅在 workQueue 上读写。
     private var isDriving = false
@@ -54,6 +61,8 @@ final class ScanningEngine: ScanningEngineProtocol {
         imageDataLoader: @escaping (String) -> Data? = { _ in nil },
         hashComputer: @escaping (Data) -> String? = { _ in nil },
         embeddingComputer: @escaping (Data) -> [Double]? = { _ in nil },
+        featureAnalyzer: @escaping (Data) -> VisionAnalysisResult? = { _ in nil },
+        hasUserData: Bool = false,
         workQueue: DispatchQueue = DispatchQueue(label: "com.aiphotoinbox.ScanningEngine", qos: .userInitiated)
     ) {
         self.photoLibrary = photoLibrary
@@ -62,6 +71,8 @@ final class ScanningEngine: ScanningEngineProtocol {
         self.imageDataLoader = imageDataLoader
         self.hashComputer = hashComputer
         self.embeddingComputer = embeddingComputer
+        self.featureAnalyzer = featureAnalyzer
+        self.hasUserData = hasUserData
         self.machine = ScanStateMachine(store: store)
         publishSnapshot()
     }
@@ -78,11 +89,18 @@ final class ScanningEngine: ScanningEngineProtocol {
         return progressSnapshot
     }
 
-    /// 候选组快照（hashing 阶段产出）。
+    /// 候选组快照（hashing/clustering 阶段产出）。
     var candidateGroups: [CandidateGroup] {
         snapshotLock.lock()
         defer { snapshotLock.unlock() }
         return candidateGroupsSnapshot
+    }
+
+    /// 评分后的组视图（scoring 阶段产出：Best Shot / 预删除候选）。
+    var scoredGroups: [ScoredGroup] {
+        snapshotLock.lock()
+        defer { snapshotLock.unlock() }
+        return scoredGroupsSnapshot
     }
 
     // MARK: ScanningEngineProtocol
@@ -132,7 +150,8 @@ final class ScanningEngine: ScanningEngineProtocol {
         // 杀进程续跑：hashing/embedding/clustering 阶段的内存快照随进程消失，
         // 重拉元数据重建（元数据拉取廉价；已算特征从 featureprints 表复用，
         // 见 runHashingStage / runEmbeddingStage）。
-        if machine.phase == .hashing || machine.phase == .embedding || machine.phase == .clustering,
+        if machine.phase == .hashing || machine.phase == .embedding
+            || machine.phase == .clustering || machine.phase == .scoring,
            fetchedRecords.isEmpty {
             fetchedRecords = photoLibrary.fetchAllAssets()
         }
@@ -179,10 +198,11 @@ final class ScanningEngine: ScanningEngineProtocol {
                     break driveLoop
                 }
             case .scoring:
-                // TODO(T09): 保留分引擎接线后替换占位推进。
-                machine.advance()
-                publishSnapshot()
-                reportProgress()
+                if !runScoringStage() {
+                    publishSnapshot()
+                    reportProgress()
+                    break driveLoop
+                }
             case .idle, .done, .paused:
                 break driveLoop
             }
@@ -202,6 +222,7 @@ final class ScanningEngine: ScanningEngineProtocol {
         fetchedRecords = assets
         hashByID = [:]
         embeddingByID = [:]
+        scoresByID = [:]
         let fetchedAt = Date()
         let total = max(assets.count, 1)
         for (index, record) in assets.enumerated() {
@@ -336,6 +357,65 @@ final class ScanningEngine: ScanningEngineProtocol {
 
         snapshotLock.lock()
         candidateGroupsSnapshot = groups
+        snapshotLock.unlock()
+
+        machine.advance()
+        publishSnapshot()
+        reportProgress()
+        return true
+    }
+
+    /// scoring：逐组跑 GroupScoring（KeepScore 接线 + 冗余度 + SafetyRules 过滤）
+    /// → Best Shot 标记 → 预删除候选集。缺特征的资产按中性值参与评分。
+    private func runScoringStage() -> Bool {
+        // 复用已持久化的分数（信封 kind=3）。
+        for (assetId, values) in database.allFeatureprintScores(featureVersion: ScanStateMachine.featureVersion)
+        where values.count == 4 {
+            scoresByID[assetId] = VisionAnalysisResult(
+                clarity: values[0], aesthetics: values[1],
+                faceQuality: values[2], saliency: values[3]
+            )
+        }
+
+        let total = max(candidateGroupsSnapshot.count, 1)
+        var scored: [ScoredGroup] = []
+        for (index, group) in candidateGroupsSnapshot.enumerated() {
+            if consumePauseRequest() {
+                machine.pause(reason: "用户暂停")
+                return false
+            }
+
+            // 缺分数的成员补算（经注入的分析器；失败回退中性值由聚合层保证）。
+            for member in group.members where scoresByID[member.localIdentifier] == nil {
+                guard let data = imageDataLoader(member.localIdentifier),
+                      let features = featureAnalyzer(data) else { continue }
+                scoresByID[member.localIdentifier] = features
+                database.upsertFeatureprint(
+                    assetId: member.localIdentifier,
+                    data: FeaturePrintCodec.encodeScores([
+                        features.clarity, features.aesthetics,
+                        features.faceQuality, features.saliency,
+                    ]),
+                    featureVersion: ScanStateMachine.featureVersion,
+                    computedAt: Date()
+                )
+            }
+
+            scored.append(GroupScoring.score(
+                group: group,
+                featuresByID: scoresByID,
+                hashByID: hashByID,
+                embeddingByID: embeddingByID,
+                hasUserData: hasUserData
+            ))
+
+            machine.setProgress(Double(index + 1) / Double(total))
+            publishSnapshot()
+            reportProgress()
+        }
+
+        snapshotLock.lock()
+        scoredGroupsSnapshot = scored
         snapshotLock.unlock()
 
         machine.advance()

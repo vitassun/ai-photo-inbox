@@ -10,6 +10,8 @@ enum FeaturePrintCodec {
     enum Kind: UInt8 {
         case hash = 1
         case embedding = 2
+        /// 四维特征分数（clarity/aesthetics/faceQuality/saliency，已归一化）。
+        case scores = 3
     }
 
     // MARK: pHash（"1" + utf8 hex）
@@ -38,6 +40,26 @@ enum FeaturePrintCodec {
 
     static func decodeEmbedding(_ data: Data) -> [Double]? {
         guard let kind = data.first, kind == Kind.embedding.rawValue else { return nil }
+        return decodeDoubles(data)
+    }
+
+    // MARK: 四维分数（"3" + little-endian double ×4，复用 embedding 编码）
+
+    static func encodeScores(_ scores: [Double]) -> Data {
+        var data = Data([Kind.scores.rawValue])
+        for value in scores {
+            var littleEndianBits = value.bitPattern.littleEndian
+            withUnsafeBytes(of: littleEndianBits) { data.append(contentsOf: $0) }
+        }
+        return data
+    }
+
+    static func decodeScores(_ data: Data) -> [Double]? {
+        guard let kind = data.first, kind == Kind.scores.rawValue else { return nil }
+        return decodeDoubles(data)
+    }
+
+    private static func decodeDoubles(_ data: Data) -> [Double]? {
         let payload = data.dropFirst()
         let elementSize = MemoryLayout<Double>.size
         guard !payload.isEmpty, payload.count % elementSize == 0 else { return nil }

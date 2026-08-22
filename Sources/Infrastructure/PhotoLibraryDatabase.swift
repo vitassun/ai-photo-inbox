@@ -248,6 +248,25 @@ final class PhotoLibraryDatabase {
         return result
     }
 
+    /// 读回指定版本的全部四维特征分数。供 scoring 阶段续扫复用。
+    func allFeatureprintScores(featureVersion: Int) -> [String: [Double]] {
+        var result: [String: [Double]] = [:]
+        try? writer.read { db in
+            let rows = try Row.fetchAll(
+                db,
+                sql: "SELECT asset_id, data FROM featureprints WHERE feature_version = ?",
+                arguments: [featureVersion]
+            )
+            for row in rows {
+                if let data = row["data"] as? Data,
+                   let scores = FeaturePrintCodec.decodeScores(data) {
+                    result[row["asset_id"] as String] = scores
+                }
+            }
+        }
+        return result
+    }
+
     /// 丢弃非当前版本的特征行（ScanStateMachine.FEATURE_VERSION 变更后的脏数据清理）。
     func purgeFeatureprints(keepingFeatureVersion version: Int) {
         try? writer.write { db in
