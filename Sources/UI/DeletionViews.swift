@@ -157,14 +157,15 @@ struct AssetThumbnailView: View {
             options.deliveryMode = .fastFormat
             options.isNetworkAccessAllowed = false   // iCloud 未下载资产显示占位，不触发下载
             options.isSynchronous = true
-            // 2x of 56pt 显示尺寸。
-            let thumbnail = PHImageManager.default().requestImage(
+            // 2x of 56pt 显示尺寸；isSynchronous 下 handler 同步回调。
+            var delivered: UIImage?
+            PHImageManager.default().requestImage(
                 for: asset,
                 targetSize: CGSize(width: 112, height: 112),
                 contentMode: .aspectFill,
                 options: options
-            ) { delivered, _ in delivered }
-            DispatchQueue.main.async { self.image = thumbnail }
+            ) { img, _ in delivered = img }
+            DispatchQueue.main.async { self.image = delivered }
         }
     }
 }
