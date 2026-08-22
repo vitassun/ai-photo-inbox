@@ -1,16 +1,18 @@
 // MARK: - DeletionViews
-// 职责：安全删除流的两个页面——待删清单（网格多选 + 触发系统确认框）
-//       与最近删除教育页（30 天可恢复 / 本 App 永不静默清除）。
+// 职责：安全删除流的两个页面——待删清单（按相似组分节 + 组内多选 +
+//       触发系统确认框）与最近删除教育页（30 天可恢复 / 永不静默清除）。
 // 任务卡：T10。文案红线：不出现"立即彻底删除"类误导表述；
 //        彻底删除永远是用户去系统相册做的动作。
+// 审阅结构红线：候选必须按相似组呈现（P4/P5 的核心交互），
+//        不许拍平成无差别列表让用户对着编号猜。
 
 import SwiftUI
 import Photos
 
-/// 待删清单页：展示评分+SafetyRules 过滤后的预删除候选，用户多选后
-/// 触发 requestDelete——真正的删除发生在系统确认框里。
+/// 待删清单页：每个相似组一节，横排展示组内成员（Best Shot 星标、
+/// 不可选），仅 SafetyRules 放行的成员可勾选，多组累计后统一进系统确认框。
 struct DeletionReviewView: View {
-    /// 候选条目（已过 SafetyRules；id 即 localIdentifier）。
+    /// 候选组（已过 SafetyRules；preselectableIDs 即可勾选成员）。
     let candidates: [ScoredGroup]
     let deletionService: PhotoLibraryServiceProtocol
     let database: PhotoLibraryDatabase
@@ -21,8 +23,12 @@ struct DeletionReviewView: View {
     @State private var isDeleting = false
     @State private var statusText: String?
 
-    private var allCandidateIDs: [String] {
-        DeletionFlow.pendingDeletionIDs(from: candidates)
+    private var displayableGroups: [ScoredGroup] {
+        candidates.filter { !$0.preselectableIDs.isEmpty }
+    }
+
+    private var totalPreselectableCount: Int {
+        displayableGroups.reduce(0) { $0 + $1.preselectableIDs.count }
     }
 
     var body: some View {
@@ -33,14 +39,14 @@ struct DeletionReviewView: View {
                     .foregroundStyle(.secondary)
                     .padding(8)
             }
-            if allCandidateIDs.isEmpty {
+            if displayableGroups.isEmpty {
                 ContentUnavailableView(
                     "暂无待删候选",
                     systemImage: "checkmark.seal",
-                    description: Text("扫描完成后，经安全规则过滤的候选会出现在这里")
+                    description: Text("扫描完成后，经安全规则过滤的相似组会出现在这里")
                 )
             } else {
-                candidateGrid
+                groupedList
             }
 
             NavigationLink("为什么删除的照片还能找回 30 天？") {
@@ -52,47 +58,101 @@ struct DeletionReviewView: View {
         .navigationTitle("待删清单")
     }
 
-    private var candidateGrid: some View {
-        VStack(spacing: 12) {
-            List(allCandidateIDs, id: \.self) { id in
-                Button {
-                    if selectedIDs.contains(id) {
-                        selectedIDs.remove(id)
-                    } else {
-                        selectedIDs.insert(id)
-                    }
-                } label: {
-                    HStack(spacing: 12) {
-                        Image(systemName: selectedIDs.contains(id) ? "checkmark.circle.fill" : "circle")
-                            .foregroundStyle(selectedIDs.contains(id) ? Color.accentColor : .secondary)
-                        AssetThumbnailView(localIdentifier: id)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("待确认候选")
-                                .font(.subheadline)
-                            Text(id)
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
+    private var groupedList: some View {
+        VStack(spacing: 0) {
+            List {
+                ForEach(displayableGroups, id: \.groupID) { group in
+                    Section {
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            HStack(alignment: .top, spacing: 12) {
+                                ForEach(group.members, id: \.record.localIdentifier) { member in
+                                    memberCard(member, group: group)
+                                }
+                            }
+                            .padding(.vertical, 6)
                         }
-                        Spacer()
+                    } header: {
+                        HStack {
+                            Text("\(shortGroupLabel(group)) · 共 \(group.members.count) 张")
+                            Spacer()
+                            Button("全选本组") {
+                                selectedIDs.formUnion(group.preselectableIDs)
+                            }
+                            .font(.caption)
+                        }
                     }
                 }
-                .foregroundStyle(.primary)
             }
-            .listStyle(.plain)
+            .listStyle(.insetGrouped)
 
             Button {
                 confirmDeletion()
             } label: {
-                // 文案指向系统确认框流程，绝不暗示本 App 直接彻底删除。
-                Text(selectedIDs.isEmpty ? "选择要删除的照片" : "进入系统确认框，删除 \(selectedIDs.count) 张")
+                Text(selectedIDs.isEmpty
+                     ? "勾选要删除的照片（共 \(totalPreselectableCount) 张候选）"
+                     : "进入系统确认框，删除 \(selectedIDs.count) 张")
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 10)
             }
             .buttonStyle(.borderedProminent)
             .disabled(selectedIDs.isEmpty || isDeleting)
             .padding(.horizontal)
+            .padding(.bottom, 8)
         }
+    }
+
+    /// 组内成员卡片：缩略图 + 勾选态；Best Shot 星标且永不可选（红线）。
+    private func memberCard(_ member: ScoredMember, group: ScoredGroup) -> some View {
+        let id = member.record.localIdentifier
+        let selectable = group.preselectableIDs.contains(id)
+        let selected = selectedIDs.contains(id)
+
+        return Button {
+            if selectable {
+                if selected {
+                    selectedIDs.remove(id)
+                } else {
+                    selectedIDs.insert(id)
+                }
+            }
+        } label: {
+            VStack(spacing: 4) {
+                ZStack(alignment: .topLeading) {
+                    AssetThumbnailView(localIdentifier: id, side: 84)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8)
+                                .stroke(selected ? Color.red : Color.clear, lineWidth: 2.5)
+                        )
+                        .opacity(selectable || selected ? 1 : 0.45)
+
+                    if member.isBestShot {
+                        Image(systemName: "star.fill")
+                            .font(.caption)
+                            .foregroundStyle(.yellow)
+                            .padding(4)
+                            .background(.ultraThinMaterial, in: Circle())
+                    }
+
+                    if selected {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.title3)
+                            .symbolRenderingMode(.palette)
+                            .foregroundStyle(.white, .red)
+                            .transition(.scale)
+                    }
+                }
+                Text(member.isBestShot ? "★ 最佳" : String(format: "分 %.2f", member.score))
+                    .font(.caption2)
+                    .foregroundStyle(selectable ? .primary : .secondary)
+            }
+        }
+        .buttonStyle(.plain)
+        .disabled(!selectable)
+    }
+
+    private func shortGroupLabel(_ group: ScoredGroup) -> String {
+        let suffix = group.groupID.suffix(8)
+        return "组 #\(suffix)"
     }
 
     private func confirmDeletion() {
@@ -115,6 +175,7 @@ struct DeletionReviewView: View {
 
 /// 资产缩略图：按 localIdentifier 从 PhotoKit 拉小图（只读，不触发 iCloud 下载）。
 struct AssetThumbnailView: View {
+    var side: CGFloat = 56
     let localIdentifier: String
 
     @State private var image: UIImage?
@@ -139,8 +200,8 @@ struct AssetThumbnailView: View {
                 }
             }
         }
-        .frame(width: 56, height: 56)
-        .clipShape(RoundedRectangle(cornerRadius: 6))
+        .frame(width: side, height: side)
+        .clipShape(RoundedRectangle(cornerRadius: 8))
         .onAppear(perform: load)
     }
 
@@ -157,11 +218,11 @@ struct AssetThumbnailView: View {
             options.deliveryMode = .fastFormat
             options.isNetworkAccessAllowed = false   // iCloud 未下载资产显示占位，不触发下载
             options.isSynchronous = true
-            // 2x of 56pt 显示尺寸；isSynchronous 下 handler 同步回调。
+            // 2x 显示尺寸；isSynchronous 下 handler 同步回调。
             var delivered: UIImage?
             PHImageManager.default().requestImage(
                 for: asset,
-                targetSize: CGSize(width: 112, height: 112),
+                targetSize: CGSize(width: side * 2, height: side * 2),
                 contentMode: .aspectFill,
                 options: options
             ) { img, _ in delivered = img }
@@ -177,7 +238,7 @@ struct RecentlyDeletedEducationView: View {
             VStack(alignment: .leading, spacing: 16) {
                 educationBlock(
                     title: "删除的照片去哪了",
-                    body: "你在系统确认框中批准的删除，会先进入 iOS 系统的\"最近删除\"相册，保留约 30 天，随时可以自己恢复。"
+                    body: "你在系统确认框中批准的删除，会先进入 iOS 系统的\"最近删除\"相簿，保留约 30 天，随时可以自己恢复。"
                 )
                 educationBlock(
                     title: "本 App 的承诺",
