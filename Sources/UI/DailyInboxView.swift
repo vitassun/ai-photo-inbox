@@ -9,6 +9,7 @@ struct DailyInboxView: View {
     @StateObject private var environment = AppEnvironment.shared
     @State private var summary: DailyInboxSummary?
     @State private var authStatus: PhotoAuthorizationStatus = .notDetermined
+    @State private var accessPromptShown = false
 
     var body: some View {
         NavigationStack {
@@ -58,24 +59,34 @@ struct DailyInboxView: View {
         VStack(alignment: .leading, spacing: 8) {
             Text("处理入口").font(.headline)
 
-            if authStatus == .authorized || authStatus == .limited {
+            switch authStatus {
+            case .authorized, .limited:
                 Button("开始 / 继续扫描") {
-                    AppEnvironment.shared.engine.runFullScan { _, _ in }
-                    AppEnvironment.shared.photoLibraryService.requestAccess { _ in }
+                    environment.engine.runFullScan { _, _ in }
+                }
+                .buttonStyle(.bordered)
+            case .notDetermined:
+                Button("授权相册访问，开始整理") { promptAccess() }
+                    .buttonStyle(.borderedProminent)
+            case .denied, .restricted:
+                Button("相册权限被拒绝，去系统设置开启") {
+                    environment.photoLibraryService.openSystemSettings()
                 }
                 .buttonStyle(.bordered)
             }
 
-            NavigationLink("待删确认清单") {
-                DeletionReviewView(
-                    candidates: environment.scoredGroupsSnapshotView(),
-                    deletionService: environment.photoLibraryService,
-                    database: environment.database,
-                    onDeleted: { ids in
-                        environment.engine.purgeDeletedFromViews(assetIds: ids)
-                        refresh()
-                    }
-                )
+            if authStatus == .authorized || authStatus == .limited {
+                NavigationLink("待删确认清单") {
+                    DeletionReviewView(
+                        candidates: environment.scoredGroupsSnapshotView(),
+                        deletionService: environment.photoLibraryService,
+                        database: environment.database,
+                        onDeleted: { ids in
+                            environment.engine.purgeDeletedFromViews(assetIds: ids)
+                            refresh()
+                        }
+                    )
+                }
             }
         }
     }
@@ -94,6 +105,19 @@ struct DailyInboxView: View {
     private func refresh() {
         authStatus = environment.photoLibraryService.authorizationStatus
         summary = environment.todaySummary()
+        // 首启即请求授权（T02：notDetermined 弹窗）——不能等用户找按钮，
+        // 否则未决定状态下扫描入口被挡住，弹窗永远无人触发。
+        if authStatus == .notDetermined && !accessPromptShown {
+            accessPromptShown = true
+            promptAccess()
+        }
+    }
+
+    private func promptAccess() {
+        environment.photoLibraryService.requestAccess { [weak self] _ in
+            // 回调已在主线程（实现方保证）；授权完成后整页状态刷新。
+            self?.refresh()
+        }
     }
 }
 
