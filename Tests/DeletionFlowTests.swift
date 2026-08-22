@@ -21,7 +21,7 @@ final class DeletionFlowTests: XCTestCase {
 
     func testPendingDeletionIDsOnlyContainsSafetyFilteredMembers() {
         // 构造评分视图：fav/edited 在 T09 已被 SafetyRules 剔除出 preselectableIDs。
-        let record = { (id: String) in makeRecord(id: id) }
+        let record = { (id: String) in self.makeRecord(id: id) }
         let scored = ScoredGroup(
             groupID: "g1",
             reason: "test",
