@@ -19,13 +19,13 @@ enum CloudConsent {
 
     /// 门闩读取：键缺失/值不符一律视为未同意（保守默认，零出网）。
     static func isEnabled(store: KeyValueStore) -> Bool {
-        store.keyValue(forKey: storageKey) == "on"
+        store.string(forKey: storageKey) == "on"
     }
 
     /// 写入开关并返回最终状态。关闭立即生效（下次调用方读门闩即得 false）。
     @discardableResult
     static func setEnabled(_ enabled: Bool, store: KeyValueStore) -> Bool {
-        store.setKeyValue(enabled ? "on" : "off", forKey: storageKey)
+        store.setString(enabled ? "on" : "off", forKey: storageKey)
         return enabled
     }
 }
