@@ -81,4 +81,20 @@ enum AppConfig {
     static let llmTimeoutSeconds: TimeInterval = 8
     /// 重试上限（至多 1 次重试，即最多 2 次请求）。
     static let llmMaxRetries = 1
+
+    // MARK: T16 低质量批量页
+
+    /// clarity 低于此值判定"模糊"候选。初值保守（自然图 clarity 多显著高于此，
+    /// 糊片/纯色废片贴近 0），T16 验收的 20 张标注集校准后修订。
+    static let lowQualityClarityThreshold = 0.18
+
+    /// 过曝/欠曝判定：对应亮度像素占比 ≥ 此值。
+    /// 来源：PRD P6 三分区口径；调参入口：人工标注对照集（T06 验收同源）。
+    static let lowQualityOverExposedRatioThreshold = 0.30
+    static let lowQualityUnderExposedRatioThreshold = 0.30
+
+    // MARK: T15 截图任务箱
+
+    /// PDF 导出用原图采样最大边长（像素）：收据文字可读与内存占用的折中。
+    static let pdfExportMaxDimension = 1600
 }

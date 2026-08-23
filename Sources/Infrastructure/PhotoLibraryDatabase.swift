@@ -67,6 +67,11 @@ final class PhotoLibraryDatabase {
         (name: "v1.indexes", statements: [
             "CREATE INDEX IF NOT EXISTS idx_assets_created ON assets(creation_date)",
         ]),
+        // v2（T15）：截图分类补 OCR 全文列——copy_text 动作与 LLM 兜底的数据源。
+        // 只加列不重建（铁律：向前兼容迁移）。
+        (name: "v2.screenshotOcrText", statements: [
+            "ALTER TABLE screenshot_classifications ADD COLUMN ocr_text TEXT NOT NULL DEFAULT ''",
+        ]),
     ]
 
     static func makeMigrator(steps: [(name: String, statements: [String])] = migrationSteps) -> DatabaseMigrator {
@@ -395,6 +400,8 @@ final class PhotoLibraryDatabase {
         var temporaryLikelihood: Double
         var source: String            // rule | llm | vision_utility
         var classifiedAt: Date
+        /// OCR 全文（v2 列；copy_text 与 LLM 兜底的数据源）。旧数据为 ""。
+        var ocrText: String = ""
     }
 
     func upsertScreenshotClassification(_ classification: ScreenshotClassification) {
@@ -403,8 +410,8 @@ final class PhotoLibraryDatabase {
                 sql: """
                 INSERT INTO screenshot_classifications (
                   asset_id, category, confidence, extracted_fields,
-                  suggested_action, temporary_likelihood, source, classified_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                  suggested_action, temporary_likelihood, source, classified_at, ocr_text
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(asset_id) DO UPDATE SET
                   category = excluded.category,
                   confidence = excluded.confidence,
@@ -412,7 +419,9 @@ final class PhotoLibraryDatabase {
                   suggested_action = excluded.suggested_action,
                   temporary_likelihood = excluded.temporary_likelihood,
                   source = excluded.source,
-                  classified_at = excluded.classified_at
+                  classified_at = excluded.classified_at,
+                  ocr_text = CASE WHEN excluded.ocr_text != ''
+                                  THEN excluded.ocr_text ELSE screenshot_classifications.ocr_text END
                 """,
                 arguments: [
                     classification.assetId,
@@ -423,6 +432,7 @@ final class PhotoLibraryDatabase {
                     classification.temporaryLikelihood,
                     classification.source,
                     classification.classifiedAt.timeIntervalSince1970,
+                    classification.ocrText,
                 ]
             )
         }
@@ -434,7 +444,7 @@ final class PhotoLibraryDatabase {
                 db,
                 sql: """
                 SELECT asset_id, category, confidence, extracted_fields,
-                       suggested_action, temporary_likelihood, source, classified_at
+                       suggested_action, temporary_likelihood, source, classified_at, ocr_text
                 FROM screenshot_classifications WHERE asset_id = ?
                 """,
                 arguments: [assetId]
@@ -447,10 +457,94 @@ final class PhotoLibraryDatabase {
                     suggestedAction: row["suggested_action"],
                     temporaryLikelihood: row["temporary_likelihood"],
                     source: row["source"],
-                    classifiedAt: Date(timeIntervalSince1970: row["classified_at"])
+                    classifiedAt: Date(timeIntervalSince1970: row["classified_at"]),
+                    ocrText: row["ocr_text"]
                 )
             }
         }
+    }
+
+    // MARK: 截图任务箱列表（T15）
+
+    /// 任务箱一行：分类 ⋈ 资产 + 已处理标记（decisions 存在 action:* 记录）。
+    struct ScreenshotInboxRow {
+        let assetId: String
+        let category: String
+        let confidence: Double
+        let suggestedAction: String
+        let source: String
+        let classifiedAt: Date
+        let creationDate: Date?
+        let locallyAvailable: Bool
+        let ocrText: String
+        let extractedFieldsJSON: String
+        let isProcessed: Bool
+
+        /// "待定"口径（红线 5）。
+        var isPending: Bool {
+            ScreenshotInboxFilter.isPending(confidence: confidence, suggestedAction: suggestedAction)
+        }
+    }
+
+    /// 分类 ⋈ 资产联表。category 为 nil 时不过滤；creation_date 降序（NULL 殿后）。
+    func screenshotInboxRows(category: String?) -> [ScreenshotInboxRow] {
+        var rows: [ScreenshotInboxRow] = []
+        try? writer.read { db in
+            let fetched = try Row.fetchAll(
+                db,
+                sql: """
+                SELECT s.asset_id AS asset_id,
+                       s.category AS category,
+                       s.confidence AS confidence,
+                       s.suggested_action AS suggested_action,
+                       s.source AS source,
+                       s.classified_at AS classified_at,
+                       s.ocr_text AS ocr_text,
+                       s.extracted_fields AS extracted_fields,
+                       a.creation_date AS creation_date,
+                       a.locally_available AS locally_available,
+                       EXISTS(SELECT 1 FROM decisions d
+                              WHERE d.asset_id = s.asset_id AND d.reason LIKE 'action:%') AS is_processed
+                FROM screenshot_classifications s
+                JOIN assets a ON a.local_identifier = s.asset_id
+                WHERE (? IS NULL OR s.category = ?)
+                ORDER BY a.creation_date IS NULL, a.creation_date DESC
+                """,
+                arguments: [category as String?, category as String?]
+            )
+            rows = fetched.map { row in
+                ScreenshotInboxRow(
+                    assetId: row["asset_id"],
+                    category: row["category"],
+                    confidence: row["confidence"],
+                    suggestedAction: row["suggested_action"],
+                    source: row["source"],
+                    classifiedAt: Date(timeIntervalSince1970: row["classified_at"]),
+                    creationDate: (row["creation_date"] as Double?).map { Date(timeIntervalSince1970: $0) },
+                    locallyAvailable: row["locally_available"],
+                    ocrText: row["ocr_text"],
+                    extractedFieldsJSON: row["extracted_fields"],
+                    isProcessed: row["is_processed"]
+                )
+            }
+        }
+        return rows
+    }
+
+    /// 未处理任务数（首页徽标口径）：有分类、非待定、未执行过任何动作。
+    func countPendingScreenshotTasks() -> Int {
+        (try? writer.read { db in
+            try Int.fetchOne(
+                db,
+                sql: """
+                SELECT COUNT(*) FROM screenshot_classifications s
+                JOIN assets a ON a.local_identifier = s.asset_id
+                WHERE s.confidence > 0.6 AND s.suggested_action != 'manual_review'
+                  AND NOT EXISTS(SELECT 1 FROM decisions d
+                                 WHERE d.asset_id = s.asset_id AND d.reason LIKE 'action:%')
+                """
+            )
+        }) ?? 0
     }
 
     // MARK: 辅助

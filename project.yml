@@ -44,6 +44,7 @@ targets:
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
         INFOPLIST_KEY_NSPhotoLibraryUsageDescription: "需要访问你的相册来整理和筛选照片；删除操作永远经系统确认框由你亲自批准。"
+        INFOPLIST_KEY_NSCalendarsWriteOnlyAccessUsageDescription: "仅在你点按「加入日历」时写入新事件；App 不读取你的日历内容。"
     dependencies:
       - package: GRDB
 

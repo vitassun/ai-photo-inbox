@@ -46,6 +46,20 @@ final class AppEnvironment: ObservableObject {
                 return result
             },
             screenshotOCR: { VisionAnalysisService.readTextSync(imageData: $0) },
+            exifReader: { EXIFExtractor.exif(fromEncodedImageData: $0) },
+            exposureProbe: { data in
+                // T16 曝光直方图探测：缩略图重采样 128px 后算过曝/欠曝占比。
+                guard let gray = VisionAnalysisService.grayPixelsSync(imageData: data, side: 128) else {
+                    return nil
+                }
+                let over = ImageQualityDSP.overExposedRatio(
+                    grayPixels: gray.pixels, width: gray.width, height: gray.height
+                ) ?? 0
+                let under = ImageQualityDSP.underExposedRatio(
+                    grayPixels: gray.pixels, width: gray.width, height: gray.height
+                ) ?? 0
+                return (over, under)
+            },
             hasUserData: false   // V1 冷启动；用户反馈历史属后续迭代
         )
     }
@@ -60,5 +74,22 @@ final class AppEnvironment: ObservableObject {
             pendingDeletionCount: database.countDeleteVerdicts(),
             actionCount: database.countActions(atOrAfter: dayStart)
         )
+    }
+
+    // MARK: T15/T16 页面入口
+
+    /// 截图任务箱待处理数（首页徽标口径：有分类、非待定、未执行过动作）。
+    func pendingTaskCount() -> Int {
+        database.countPendingScreenshotTasks()
+    }
+
+    /// 低质量候选快照（引擎镜像读取）。
+    func lowQualitySnapshot() -> [LowQualityCandidate] {
+        engine.lowQualityCandidates
+    }
+
+    /// 原图/大图字节读取（PDF 导出等动作用）。maxDimension 控制采样上限。
+    func imageData(for assetId: String, maxDimension: Int) -> Data? {
+        imageProvider.imageData(for: assetId, maxDimension: maxDimension)
     }
 }

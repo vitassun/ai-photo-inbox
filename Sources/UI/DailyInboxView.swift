@@ -87,7 +87,7 @@ struct DailyInboxView: View {
             }
 
             if authStatus == .authorized || authStatus == .limited {
-                NavigationLink("待删确认清单") {
+                NavigationLink {
                     DeletionReviewView(
                         candidates: environment.scoredGroupsSnapshotView(),
                         deletionService: environment.photoLibraryService,
@@ -97,6 +97,25 @@ struct DailyInboxView: View {
                             refresh()
                         }
                     )
+                } label: {
+                    entryRow(icon: "square.stack.3d.down.right", title: "待删确认清单",
+                             badge: environment.engine.scoredGroups
+                                .reduce(0) { $0 + $1.preselectableIDs.count })
+                }
+
+                NavigationLink {
+                    ScreenshotInboxView(environment: environment)
+                } label: {
+                    entryRow(icon: "doc.text.viewfinder", title: "截图任务箱",
+                             badge: environment.pendingTaskCount())
+                }
+
+                NavigationLink {
+                    LowQualityView(environment: environment, onDeleted: { _ in refresh() })
+                } label: {
+                    entryRow(icon: "camera.badge.ellipsis", title: "低质量清理",
+                             badge: environment.lowQualitySnapshot()
+                                .filter { !$0.isNightExempt }.count)
                 }
             }
         }
@@ -111,6 +130,28 @@ struct DailyInboxView: View {
         .frame(maxWidth: .infinity)
         .padding(.vertical, 12)
         .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 10))
+    }
+
+    /// 处理入口行：图标 + 标题 + 待处理数徽标（0 时不显示）。
+    private func entryRow(icon: String, title: String, badge: Int) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: icon)
+                .foregroundStyle(.tint)
+                .frame(width: 22)
+            Text(title)
+            Spacer()
+            if badge > 0 {
+                Text("\(badge)")
+                    .font(.caption.bold())
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 2)
+                    .background(Color.red.opacity(0.85), in: Capsule())
+                    .foregroundStyle(.white)
+            }
+            Image(systemName: "chevron.right")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+        }
     }
 
     private func refresh() {

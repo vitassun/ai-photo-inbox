@@ -21,6 +21,22 @@ enum TemporaryMarker {
     static func isExpired(expiresAt: Date, now: Date) -> Bool {
         now >= expiresAt
     }
+
+    /// 落 decisions reason 的带过期标记串（T15）。
+    /// 格式兼容 countActions 的 `action:%` 前缀统计口径。
+    static func reasonWithExpiry(from markedAt: Date, days: Int = defaultRetentionDays) -> String {
+        let expiry = Int(expiryDate(from: markedAt, days: days).timeIntervalSince1970)
+        return "action:\(ScreenshotTaskAction.markTemporary.rawValue):expiry=\(expiry)"
+    }
+
+    /// 从 reason 串解回过期时间（列表展示"X 天后提醒清理"用）；格式不符返回 nil。
+    static func expiry(fromReason reason: String) -> Date? {
+        guard reason.hasPrefix("action:\(ScreenshotTaskAction.markTemporary.rawValue):expiry=") else {
+            return nil
+        }
+        guard let epoch = reason.split(separator: "=").last.flatMap({ Double($0) }) else { return nil }
+        return Date(timeIntervalSince1970: epoch)
+    }
 }
 
 /// 日历事件草稿：从票面/日程 OCR 文本提取的写入前对象。
