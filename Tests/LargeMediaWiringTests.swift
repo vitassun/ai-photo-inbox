@@ -73,7 +73,9 @@ final class LargeMediaWiringTests: XCTestCase {
             photoLibrary: service,
             database: database,
             store: store,
-            imageDataLoader: { _ in nil },
+            // 加载器必须吐数据：hashComputer 靠解码 id 判定 dup 前缀，
+            // 返回 nil 会跳过哈希计算 → 组认领断言失效。
+            imageDataLoader: { id in Data(id.utf8) },
             hashComputer: { data in
                 let id = String(decoding: data, as: UTF8.self)
                 return id.hasPrefix("dup") ? "abcdef0123456789" : nil
