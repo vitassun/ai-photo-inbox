@@ -77,13 +77,26 @@ extension PHAssetSnapshot {
         modificationDate = phAsset.modificationDate
         isScreenshot = phAsset.mediaSubtypes.contains(.photoScreenshot)
         isLivePhoto = phAsset.mediaSubtypes.contains(.photoLive)
-        locallyAvailable = phAsset.locallyAvailable
+        locallyAvailable = Self.isLocallyAvailable(phAsset)
         if let coordinate = phAsset.location?.coordinate {
             latitude = coordinate.latitude
             longitude = coordinate.longitude
         } else {
             latitude = nil
             longitude = nil
+        }
+    }
+
+    /// 原件是否在本机（T17：iCloud 未下载折叠分组依据）。
+    /// PHAsset 无公开"原件在本机"API（与 §1.4 文件大小同源的约束域）；
+    /// 经 PHAssetResource 的运行时只读属性探测，任何异常一律保守回退
+    /// "本机可用"——宁可少折叠，不可把可清理项误标成未下载而隐藏。
+    /// 只读探测，无任何写入，不做体积读取（KVC 取 fileSize 的否决不适用）。
+    private static func isLocallyAvailable(_ asset: PHAsset) -> Bool {
+        let resources = PHAssetResource.assetResources(for: asset)
+        guard !resources.isEmpty else { return true }
+        return resources.allSatisfy { resource in
+            (resource.value(forKey: "locallyAvailable") as? Bool) ?? true
         }
     }
 }
