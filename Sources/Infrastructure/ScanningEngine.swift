@@ -58,6 +58,8 @@ final class ScanningEngine: ScanningEngineProtocol {
     private var scoredGroupsSnapshot: [ScoredGroup] = []
     /// 低质量候选快照（T16，含夜间豁免标记项）。镜像受 snapshotLock 保护。
     private var lowQualitySnapshot: [LowQualityCandidate] = []
+    /// 大媒体候选快照（T17，估算体积降序）。镜像受 snapshotLock 保护。
+    private var largeMediaSnapshot: [LargeMediaCandidate] = []
 
     /// 仅在 workQueue 上读写。
     private var isDriving = false
@@ -147,6 +149,7 @@ final class ScanningEngine: ScanningEngineProtocol {
 
             let deletedIds = deleted
             self.lowQualitySnapshot.removeAll { deletedIds.contains($0.record.localIdentifier) }
+            self.largeMediaSnapshot.removeAll { deletedIds.contains($0.record.localIdentifier) }
             completion?()
         }
     }
@@ -180,6 +183,13 @@ final class ScanningEngine: ScanningEngineProtocol {
             let removed = Set(assetIds)
             self.lowQualitySnapshot.removeAll { removed.contains($0.record.localIdentifier) }
         }
+    }
+
+    /// 大媒体候选快照（T17）。
+    var largeMediaCandidates: [LargeMediaCandidate] {
+        snapshotLock.lock()
+        defer { snapshotLock.unlock() }
+        return largeMediaSnapshot
     }
 
     // MARK: ScanningEngineProtocol
@@ -309,7 +319,11 @@ final class ScanningEngine: ScanningEngineProtocol {
                 machine.pause(reason: "用户暂停")
                 return false
             }
-            database.upsert(asset: record, fetchedAt: fetchedAt)
+            database.upsert(
+                asset: record,
+                fetchedAt: fetchedAt,
+                estimatedBytes: MediaSizeEstimator.estimatedBytes(for: record)
+            )
             machine.setProgress(Double(index + 1) / Double(total))
             if (index + 1) % 200 == 0 || index + 1 == assets.count {
                 publishSnapshot()
@@ -499,6 +513,7 @@ final class ScanningEngine: ScanningEngineProtocol {
 
         classifyScreenshots()
         detectLowQuality()
+        detectLargeMedia()
 
         machine.advance()
         publishSnapshot()
@@ -611,6 +626,30 @@ final class ScanningEngine: ScanningEngineProtocol {
 
         snapshotLock.lock()
         lowQualitySnapshot = detected
+        snapshotLock.unlock()
+    }
+
+    /// 大媒体清理 pass（T17）：估算体积 ≥ 阈值、未被相似组认领的资产
+    /// （收藏/编辑过由 LargeMediaFilter 内部红线过滤）。裁决幂等口径与
+    /// 低质量 pass 一致：用户 keep 不改写。估算值同步落 assets.estimated_bytes。
+    private func detectLargeMedia() {
+        let claimed = Set(candidateGroupsSnapshot.flatMap(\.memberIDs))
+        let candidates = LargeMediaFilter.candidates(from: fetchedRecords, idsInCandidateGroups: claimed)
+
+        for candidate in candidates {
+            let assetId = candidate.record.localIdentifier
+            if database.decision(assetId: assetId)?.verdict != .keep {
+                database.setDecision(
+                    assetId: assetId,
+                    verdict: .delete,
+                    reason: "large_media",
+                    decidedAt: Date()
+                )
+            }
+        }
+
+        snapshotLock.lock()
+        largeMediaSnapshot = candidates
         snapshotLock.unlock()
     }
 

@@ -37,6 +37,9 @@ struct AssetRecord: Equatable {
     let latitude: Double?
     /// 拍摄地经度（度）；无 GPS 信息时为 nil。
     let longitude: Double?
+    /// 原件是否在本机（iCloud 未下载 = false）。T17 大媒体页折叠分组依据；
+    /// assets 表同名列的内存来源，适配层从 PHAsset.locallyAvailable 填充。
+    var locallyAvailable: Bool = true
 
     /// 像素总量，供低质量/大文件启发式参考。
     var pixelCount: Int { pixelWidth * pixelHeight }

@@ -137,9 +137,15 @@ final class PhotoLibraryDatabase {
 
     // MARK: assets 表
 
-    /// upsert by local_identifier。estimated_bytes/burst_id/locally_available
-    /// 属 T07 域，本卡保持默认值（NULL / nil / 1）。
-    func upsert(asset record: AssetRecord, fetchedAt: Date, locallyAvailable: Bool = true) {
+    /// upsert by local_identifier。estimated_bytes 由引擎在 fetching 阶段经
+    /// MediaSizeEstimator 填充（T17）；burst_id 属后续域保持默认 NULL；
+    /// locally_available 如实落表（iCloud 未下载=0，大媒体页折叠分组依据）。
+    func upsert(
+        asset record: AssetRecord,
+        fetchedAt: Date,
+        locallyAvailable: Bool = true,
+        estimatedBytes: Int64? = nil
+    ) {
         try? writer.write { db in
             try db.execute(
                 sql: """
@@ -157,6 +163,7 @@ final class PhotoLibraryDatabase {
                   duration_seconds = excluded.duration_seconds,
                   creation_date = excluded.creation_date,
                   is_screenshot = excluded.is_screenshot,
+                  estimated_bytes = excluded.estimated_bytes,
                   locally_available = excluded.locally_available,
                   fetched_at = excluded.fetched_at
                 """,
@@ -171,7 +178,7 @@ final class PhotoLibraryDatabase {
                     record.creationDate?.timeIntervalSince1970,
                     record.isScreenshot,
                     nil as String?,
-                    nil as Int?,
+                    estimatedBytes,
                     locallyAvailable,
                     fetchedAt.timeIntervalSince1970,
                 ]

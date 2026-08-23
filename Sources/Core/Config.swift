@@ -77,6 +77,10 @@ enum AppConfig {
 
     // MARK: T13 LLM 兜底客户端
 
+    /// backend 代理基址（T18 接线用）。token 经构建注入（Keychain/环境），
+    /// 绝不入 git；缺失时客户端自动走降级路径。
+    static let llmBaseURL = URL(string: "https://api.aiphotoinbox.app")!
+
     /// 单次请求超时（秒）。降级铁律：超时/非 200/解析失败/断网一律回落纯规则。
     static let llmTimeoutSeconds: TimeInterval = 8
     /// 重试上限（至多 1 次重试，即最多 2 次请求）。

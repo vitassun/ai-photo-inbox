@@ -34,6 +34,8 @@ struct PHAssetSnapshot {
     let isScreenshot: Bool
     /// 是否 Live Photo（.photoLive 子类型；删除须原子处理，见 T07/T10）。
     let isLivePhoto: Bool
+    /// 原件是否在本机（T17：iCloud 未下载折叠分组依据）。
+    let locallyAvailable: Bool
     /// 拍摄地坐标（度）；资产无 GPS 信息时为 nil。仅扫描当轮内存使用，不落库。
     let latitude: Double?
     let longitude: Double?
@@ -55,7 +57,8 @@ struct PHAssetSnapshot {
             isScreenshot: isScreenshot,
             isLivePhoto: isLivePhoto,
             latitude: latitude,
-            longitude: longitude
+            longitude: longitude,
+            locallyAvailable: locallyAvailable
         )
     }
 }
@@ -74,6 +77,7 @@ extension PHAssetSnapshot {
         modificationDate = phAsset.modificationDate
         isScreenshot = phAsset.mediaSubtypes.contains(.photoScreenshot)
         isLivePhoto = phAsset.mediaSubtypes.contains(.photoLive)
+        locallyAvailable = phAsset.locallyAvailable
         if let coordinate = phAsset.location?.coordinate {
             latitude = coordinate.latitude
             longitude = coordinate.longitude

@@ -33,6 +33,15 @@ struct DailyInboxView: View {
                 .padding()
             }
             .navigationTitle("Daily Inbox")
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    NavigationLink {
+                        SettingsView(environment: environment)
+                    } label: {
+                        Image(systemName: "gearshape")
+                    }
+                }
+            }
             .onAppear(perform: refresh)
         }
     }
@@ -116,6 +125,14 @@ struct DailyInboxView: View {
                     entryRow(icon: "camera.badge.ellipsis", title: "低质量清理",
                              badge: environment.lowQualitySnapshot()
                                 .filter { !$0.isNightExempt }.count)
+                }
+
+                NavigationLink {
+                    LargeMediaView(environment: environment, onDeleted: { _ in refresh() })
+                } label: {
+                    entryRow(icon: "video.badge.waveform", title: "大媒体清理",
+                             badge: environment.largeMediaSnapshot()
+                                .filter { $0.record.locallyAvailable }.count)
                 }
             }
         }

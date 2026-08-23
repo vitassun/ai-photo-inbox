@@ -17,6 +17,9 @@ final class AppEnvironment: ObservableObject {
     let photoLibraryService: SystemPhotoLibraryService
     private let imageProvider = PhotoKitImageDataProvider()
     let engine: ScanningEngine
+    /// LLM 兜底客户端（T18 接线）：isLiveMode 即云端同意门闩——
+    /// 未同意时零出网（MOCK/规则路径），同意后才放行远端请求。
+    let llmClient: LLMClientProtocol
 
     init() {
         let docs = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -62,6 +65,17 @@ final class AppEnvironment: ObservableObject {
             },
             hasUserData: false   // V1 冷启动；用户反馈历史属后续迭代
         )
+
+        llmClient = ResilientLLMClient(
+            remote: RemoteLLMClient(
+                baseURL: AppConfig.llmBaseURL,
+                tokenProvider: { nil }   // 构建注入点（Keychain/环境）；缺失自动降级
+            ),
+            fallbackClassify: { ocrText in
+                ScreenshotRuleClassifier.classify(ocrText: ocrText, isScreenshot: true, aspectRatio: 1.8)
+            },
+            isLiveMode: { [store] in CloudConsent.isEnabled(store: store) }
+        )
     }
 
     /// 摘要（打开即算：全部来自本地库计数，不触发扫描——P2 验收口径）。
@@ -86,6 +100,11 @@ final class AppEnvironment: ObservableObject {
     /// 低质量候选快照（引擎镜像读取）。
     func lowQualitySnapshot() -> [LowQualityCandidate] {
         engine.lowQualityCandidates
+    }
+
+    /// 大媒体候选快照（引擎镜像读取）。
+    func largeMediaSnapshot() -> [LargeMediaCandidate] {
+        engine.largeMediaCandidates
     }
 
     /// 原图/大图字节读取（PDF 导出等动作用）。maxDimension 控制采样上限。
