@@ -39,6 +39,10 @@ final class ScanningEngine: ScanningEngineProtocol {
     private let featureAnalyzer: (Data) -> VisionAnalysisResult?
     /// 截图子管线 OCR 注入（T11）：返回识别文本或 nil（失败/无文本 → 待定）。
     private let screenshotOCR: (Data) -> String?
+    /// 低质量检测注入（T16）：编码图像数据 → EXIF 字典（夜间白名单豁免判定）。
+    private let exifReader: (Data) -> [String: Any]?
+    /// 低质量检测注入（T16）：编码图像数据 → 曝光直方图占比（过曝/欠曝）。
+    private let exposureProbe: (Data) -> (over: Double, under: Double)?
     /// 冷启动开关（V1 无反馈历史恒 false → favoriteBoost 翻倍；反馈历史属 T14 后）。
     private let hasUserData: Bool
 
@@ -52,6 +56,8 @@ final class ScanningEngine: ScanningEngineProtocol {
     private var candidateGroupsSnapshot: [CandidateGroup] = []
     /// 评分后的组视图（Best Shot / 预删除候选集）。镜像受 snapshotLock 保护。
     private var scoredGroupsSnapshot: [ScoredGroup] = []
+    /// 低质量候选快照（T16，含夜间豁免标记项）。镜像受 snapshotLock 保护。
+    private var lowQualitySnapshot: [LowQualityCandidate] = []
 
     /// 仅在 workQueue 上读写。
     private var isDriving = false
@@ -65,6 +71,8 @@ final class ScanningEngine: ScanningEngineProtocol {
         embeddingComputer: @escaping (Data) -> [Double]? = { _ in nil },
         featureAnalyzer: @escaping (Data) -> VisionAnalysisResult? = { _ in nil },
         screenshotOCR: @escaping (Data) -> String? = { _ in nil },
+        exifReader: @escaping (Data) -> [String: Any]? = { _ in nil },
+        exposureProbe: @escaping (Data) -> (over: Double, under: Double)? = { _ in nil },
         hasUserData: Bool = false,
         workQueue: DispatchQueue = DispatchQueue(label: "com.aiphotoinbox.ScanningEngine", qos: .userInitiated)
     ) {
@@ -76,6 +84,8 @@ final class ScanningEngine: ScanningEngineProtocol {
         self.embeddingComputer = embeddingComputer
         self.featureAnalyzer = featureAnalyzer
         self.screenshotOCR = screenshotOCR
+        self.exifReader = exifReader
+        self.exposureProbe = exposureProbe
         self.hasUserData = hasUserData
         self.machine = ScanStateMachine(store: store)
         publishSnapshot()
@@ -134,6 +144,9 @@ final class ScanningEngine: ScanningEngineProtocol {
                 ))
             }
             self.scoredGroupsSnapshot = keptScored
+
+            let deletedIds = deleted
+            self.lowQualitySnapshot.removeAll { deletedIds.contains($0.record.localIdentifier) }
             completion?()
         }
     }
@@ -150,6 +163,23 @@ final class ScanningEngine: ScanningEngineProtocol {
         snapshotLock.lock()
         defer { snapshotLock.unlock() }
         return scoredGroupsSnapshot
+    }
+
+    /// 低质量候选快照（T16；含夜间豁免标记项，UI 据此分区/打角标）。
+    var lowQualityCandidates: [LowQualityCandidate] {
+        snapshotLock.lock()
+        defer { snapshotLock.unlock() }
+        return lowQualitySnapshot
+    }
+
+    /// 用户把低质量候选移出（P6 长按反馈）：镜像移除。
+    /// decisions 的 user_override 落库由调用方（UI 层）负责。
+    func removeLowQualityCandidates(assetIds: [String]) {
+        workQueue.async { [weak self] in
+            guard let self else { return }
+            let removed = Set(assetIds)
+            self.lowQualitySnapshot.removeAll { removed.contains($0.record.localIdentifier) }
+        }
     }
 
     // MARK: ScanningEngineProtocol
@@ -468,6 +498,7 @@ final class ScanningEngine: ScanningEngineProtocol {
         snapshotLock.unlock()
 
         classifyScreenshots()
+        detectLowQuality()
 
         machine.advance()
         publishSnapshot()
@@ -500,10 +531,87 @@ final class ScanningEngine: ScanningEngineProtocol {
                     suggestedAction: verdict.suggestedAction,
                     temporaryLikelihood: verdict.temporaryLikelihood,
                     source: "rule",
-                    classifiedAt: Date()
+                    classifiedAt: Date(),
+                    ocrText: text ?? ""
                 )
             )
         }
+    }
+
+    /// 低质量检测 pass（T16）：未被相似组认领的 image 资产，clarity 阈值 +
+    /// 曝光直方图三分支判定；EXIF 夜间白名单命中只打豁免标（红线 6：永不进
+    /// 预选集合，不落删除裁决）。裁决幂等：已有用户 keep（user_override）的
+    /// 资产不再自动改写。
+    /// 成本注记：每个未认领资产多一次缩略图读取（曝光探测）；V1 先正确后省，
+    /// 大库优化属后续迭代（可与 hashing 阶段合并采样）。
+    private func detectLowQuality() {
+        let claimed = Set(candidateGroupsSnapshot.flatMap(\.memberIDs))
+        var detected: [LowQualityCandidate] = []
+
+        for record in fetchedRecords {
+            guard !claimed.contains(record.localIdentifier),
+                  record.mediaType == .image,
+                  !record.favorite, !record.isEdited else { continue }
+
+            let assetId = record.localIdentifier
+
+            // 特征补算（与 scoring 阶段同一信封格式落表，续扫复用）。
+            if scoresByID[assetId] == nil {
+                guard let data = imageDataLoader(assetId),
+                      let features = featureAnalyzer(data) else { continue }
+                scoresByID[assetId] = features
+                database.upsertFeatureprint(
+                    assetId: assetId,
+                    data: FeaturePrintCodec.encodeScores([
+                        features.clarity, features.aesthetics,
+                        features.faceQuality, features.saliency,
+                    ]),
+                    featureVersion: ScanStateMachine.featureVersion,
+                    computedAt: Date()
+                )
+            }
+            let clarity = scoresByID[assetId]?.clarity ?? 0.5
+
+            // 曝光探测（注入实现；缺省 nil → 只按模糊判）。
+            var overRatio: Double?
+            var underRatio: Double?
+            if let data = imageDataLoader(assetId), let probe = exposureProbe(data) {
+                overRatio = probe.over
+                underRatio = probe.under
+            }
+
+            guard let kind = LowQualityDetector.detect(
+                clarity: clarity,
+                overRatio: overRatio,
+                underRatio: underRatio
+            ) else { continue }
+
+            // EXIF 夜间白名单（红线 6）：命中 → 豁免标，永不预选、不落删除裁决。
+            var isNightExempt = false
+            if let data = imageDataLoader(assetId), let exif = exifReader(data) {
+                isNightExempt = NightWhitelist.isNightLongExposure(exif)
+            }
+
+            detected.append(LowQualityCandidate(
+                record: record, kind: kind, clarity: clarity, isNightExempt: isNightExempt
+            ))
+
+            if !isNightExempt {
+                // 用户已亲手保留的资产不再自动改写（user_override 尊重）。
+                if database.decision(assetId: assetId)?.verdict != .keep {
+                    database.setDecision(
+                        assetId: assetId,
+                        verdict: .delete,
+                        reason: "low_quality:\(kind.rawValue)",
+                        decidedAt: Date()
+                    )
+                }
+            }
+        }
+
+        snapshotLock.lock()
+        lowQualitySnapshot = detected
+        snapshotLock.unlock()
     }
 
     /// 原子读取并清零暂停请求。返回置位前的值。

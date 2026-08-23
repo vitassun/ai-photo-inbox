@@ -55,6 +55,23 @@ enum ImageQualityDSP {
         return min(1, max(0, 1 - badRatio))
     }
 
+    /// 过曝像素占比（亮度 ≥ 阈值）。维度不符返回 nil。
+    /// T16 低质量检测"过曝"分区的判定输入。
+    static func overExposedRatio(grayPixels: [UInt8], width: Int, height: Int) -> Double? {
+        guard width > 0, height > 0, grayPixels.count == width * height else { return nil }
+        guard !grayPixels.isEmpty else { return nil }
+        let over = grayPixels.lazy.filter { $0 >= AppConfig.dspOverExposedLumaThreshold }.count
+        return Double(over) / Double(grayPixels.count)
+    }
+
+    /// 欠曝像素占比（亮度 ≤ 阈值）。维度不符返回 nil。
+    static func underExposedRatio(grayPixels: [UInt8], width: Int, height: Int) -> Double? {
+        guard width > 0, height > 0, grayPixels.count == width * height else { return nil }
+        guard !grayPixels.isEmpty else { return nil }
+        let under = grayPixels.lazy.filter { $0 <= AppConfig.dspUnderExposedLumaThreshold }.count
+        return Double(under) / Double(grayPixels.count)
+    }
+
     // MARK: 灰度转换
 
     /// RGBA8 缓冲 → 单通道亮度（Rec.601）。输入长度不符返回 nil。

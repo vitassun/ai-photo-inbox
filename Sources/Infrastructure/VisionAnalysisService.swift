@@ -81,8 +81,22 @@ final class VisionAnalysisService: VisionAnalysisServiceProtocol {
 
     // MARK: 灰度采样（DSP 输入）
 
+    /// 编码图像字节 → side×side 灰度采样（T16 曝光探测入口）。
+    /// 解码失败返回 nil。
+    static func grayPixelsSync(
+        imageData: Data,
+        side: Int
+    ) -> (pixels: [UInt8], width: Int, height: Int)? {
+        guard let source = CGImageSourceCreateWithData(imageData as CFData, nil),
+              let cgImage = CGImageSourceCreateImageAtIndex(source, 0, nil),
+              let pixels = grayPixels(from: cgImage, side: side) else {
+            return nil
+        }
+        return (pixels, side, side)
+    }
+
     /// CGImage 重绘到 side×side RGBA 后转亮度缓冲。
-    private static func grayPixels(from cgImage: CGImage, side: Int) -> [UInt8]? {
+    static func grayPixels(from cgImage: CGImage, side: Int) -> [UInt8]? {
         guard let context = CGContext(
             data: nil,
             width: side,
