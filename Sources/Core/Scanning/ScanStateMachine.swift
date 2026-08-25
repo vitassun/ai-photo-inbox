@@ -78,6 +78,18 @@ final class ScanStateMachine {
         return true
     }
 
+    /// 复位到 idle（全新一轮扫描的起点），进度清零并持久化。
+    /// 仅 done/idle 允许复位；paused 应走 resume()，活动阶段不允许打断式复位。
+    /// 返回是否实际复位。
+    @discardableResult
+    func reset() -> Bool {
+        guard phase == .done || phase == .idle else { return false }
+        phase = .idle
+        progress = 0
+        persist()
+        return true
+    }
+
     /// 更新当前阶段进度（0~1，越界钳制）。非活动阶段忽略。
     func setProgress(_ value: Double) {
         guard isActive else { return }

@@ -339,4 +339,69 @@ final class ScanningEngineTests: XCTestCase {
 
         XCTAssertEqual(engine.state, .idle)
     }
+
+    // MARK: 完成后再扫（真机卡死 bug 回归）：done 状态下 runFullScan 必须重启流水线
+
+    func testRerunFromDoneRestartsPipelineAndRebuildsViews() throws {
+        let database = try PhotoLibraryDatabase.inMemory()
+        let store = GRDBKeyValueStore(database: database)
+        let queue = DispatchQueue(label: "test.engine.rerun")
+
+        // 两张同刻同哈希 → 一组；验证重扫后评分视图被重建而非残留。
+        let records = [
+            makeRecord(id: "dup-a", creationDate: Date(timeIntervalSince1970: 1_700_000_000)),
+            makeRecord(id: "dup-b", creationDate: Date(timeIntervalSince1970: 1_700_000_000)),
+        ]
+        let fakeService = FakePhotoLibraryService(records: records)
+        let engine = ScanningEngine(
+            photoLibrary: fakeService,
+            database: database,
+            store: store,
+            imageDataLoader: { id in Data(id.utf8) },
+            hashComputer: { _ in String(repeating: "a", count: 16) },
+            embeddingComputer: { _ in nil },
+            featureAnalyzer: { _ in
+                VisionAnalysisResult(clarity: 0.8, aesthetics: 0.5, faceQuality: 0.5, saliency: 0.5)
+            },
+            screenshotOCR: { _ in nil },
+            exifReader: { _ in nil },
+            exposureProbe: { _ in (over: 0, under: 0) },
+            workQueue: queue
+        )
+
+        runAndWait(engine, workQueue: queue, progressLog: ProgressLog())
+        XCTAssertEqual(engine.state, .done)
+        XCTAssertEqual(fakeService.fetchAllCallCount, 1)
+        XCTAssertEqual(engine.scoredGroups.count, 1)
+
+        // 再次 runFullScan：不得静默返回（修复前会卡死在无回调状态）。
+        runAndWait(engine, workQueue: queue, progressLog: ProgressLog())
+        XCTAssertEqual(engine.state, .done)
+        XCTAssertEqual(fakeService.fetchAllCallCount, 2, "done 重扫必须重新进 fetching")
+        XCTAssertEqual(engine.scoredGroups.count, 1, "重扫后视图重建而非残留")
+    }
+
+    // MARK: 暂停中按"开始/继续扫描"：应原地续跑而非静默卡死
+
+    func testRunFullScanWhilePausedResumesInsteadOfStalling() throws {
+        let database = try PhotoLibraryDatabase.inMemory()
+        let store = GRDBKeyValueStore(database: database)
+        let fakeService = FakePhotoLibraryService(records: makeRecords(6))
+        let queue = DispatchQueue(label: "test.engine.pausedrerun")
+        let engine = ScanningEngine(photoLibrary: fakeService, database: database, store: store, workQueue: queue)
+
+        // fetching 阶段第一个资产边界触发暂停。
+        fakeService.onFetchBegin = { engine.pause() }
+        engine.runFullScan { _, _ in }
+        queue.sync { }
+        assertPaused(engine.state)
+
+        // 不调 resume()，直接再按"开始/继续扫描"（UI 实际行为）。
+        fakeService.onFetchBegin = nil
+        engine.runFullScan { _, _ in }
+        queue.sync { }
+
+        XCTAssertEqual(engine.state, .done, "paused 下 runFullScan 必须续跑到 done")
+        XCTAssertEqual(database.assetCount(), 6)
+    }
 }

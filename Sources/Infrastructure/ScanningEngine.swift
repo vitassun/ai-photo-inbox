@@ -201,12 +201,40 @@ final class ScanningEngine: ScanningEngineProtocol {
         snapshotLock.unlock()
         workQueue.async { [weak self] in
             guard let self else { return }
-            // 从 idle 全量重扫：清掉旧版本特征脏数据（版本不符被状态机重置后的残留）。
+            switch self.machine.phase {
+            case .done:
+                // 上一轮已完成 → 全新重扫：复位状态机并清当轮内存快照。
+                // （此前该路径静默返回，UI 会永远停在"启动中…"——真机复现的卡死 bug。）
+                self.machine.reset()
+                self.clearRunSnapshots()
+            case .paused:
+                // 暂停中的"继续扫描"= 原地续跑，保留断点（此前同样会静默返回）。
+                guard self.machine.resume() else { return }
+                self.publishSnapshot()
+                self.reportProgress()
+            default:
+                break
+            }
+            // idle（全新/复位后）清掉非当前版本的特征脏数据；
+            // 当前版本哈希/向量保留复用，重扫不必重算。
             if self.machine.phase == .idle {
                 self.database.purgeFeatureprints(keepingFeatureVersion: ScanStateMachine.featureVersion)
             }
             self.startDrivingOnQueue()
         }
+    }
+
+    /// 清空当轮内存快照与中间结果（全量重扫的干净起点）。
+    /// 仅允许在 workQueue 上调用（与其它快照写路径同队列约束）。
+    private func clearRunSnapshots() {
+        fetchedRecords = []
+        hashByID = [:]
+        embeddingByID = [:]
+        scoresByID = [:]
+        candidateGroupsSnapshot = []
+        scoredGroupsSnapshot = []
+        lowQualitySnapshot = []
+        largeMediaSnapshot = []
     }
 
     func pause() {
