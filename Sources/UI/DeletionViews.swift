@@ -50,6 +50,17 @@ struct DeletionReviewView: View {
                 groupedList
             }
 
+            // 全局一键全选所有组的建议删除（跨组操作）。
+            if !displayableGroups.isEmpty && totalPreselectableCount > 0 {
+                Button("全选所有建议删除（\(totalPreselectableCount) 张）") {
+                    for group in displayableGroups {
+                        selectedIDs.formUnion(group.preselectableIDs)
+                    }
+                }
+                .font(.footnote)
+                .padding(.bottom, 4)
+            }
+
             NavigationLink("为什么删除的照片还能找回 30 天？") {
                 RecentlyDeletedEducationView()
             }
@@ -125,7 +136,7 @@ struct DeletionReviewView: View {
         }
     }
 
-    /// 组内成员卡片：点卡片开全屏原图查看器；右下角小圆钮直接勾选/取消。
+    /// 组内成员卡片：点缩略图本体开全屏原图；右下角小圆钮单独触控勾选。
     /// 所有成员（含 ★ 最佳）都可手动勾选——红线只约束"自动预选"，
     /// 用户亲手勾选并经系统确认框属于最终决定权；★ 默认不勾。
     private func memberCard(_ member: ScoredMember, group: ScoredGroup, index: Int) -> some View {
@@ -135,11 +146,17 @@ struct DeletionReviewView: View {
 
         return VStack(spacing: 4) {
             ZStack(alignment: .topLeading) {
+                // 图片区：点缩略图本身 → 开全屏查看原图。
                 AssetThumbnailView(side: 84, localIdentifier: id)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 8)
-                            .stroke(selected ? Color.red : Color.clear, lineWidth: 2.5)
-                    )
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .onTapGesture {
+                        viewerContext = ViewerContext(group: group, startIndex: index)
+                    }
+
+                // 选中态边框（纯视觉，不拦截触控）。
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(selected ? Color.red : Color.clear, lineWidth: 2.5)
+                    .allowsHitTesting(false)
 
                 if member.isBestShot {
                     Image(systemName: "star.fill")
@@ -147,18 +164,19 @@ struct DeletionReviewView: View {
                         .foregroundStyle(.yellow)
                         .padding(4)
                         .background(.ultraThinMaterial, in: Circle())
+                        .allowsHitTesting(false)
                 }
             }
             .overlay(alignment: .bottomTrailing) {
-                Button {
-                    toggleSelection(id)
-                } label: {
+                // 右下角勾选圆钮：独立点击目标，不被 onTapGesture 吞掉。
+                Button { toggleSelection(id) } label: {
                     Image(systemName: selected ? "checkmark.circle.fill" : "circle")
                         .font(.title3)
                         .symbolRenderingMode(.palette)
                         .foregroundStyle(.white, selected ? .red : .gray)
                         .shadow(radius: 2)
                 }
+                .buttonStyle(.borderless)
                 .padding(4)
             }
 
@@ -173,10 +191,6 @@ struct DeletionReviewView: View {
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
-        }
-        .contentShape(Rectangle())
-        .onTapGesture {
-            viewerContext = ViewerContext(group: group, startIndex: index)
         }
     }
 

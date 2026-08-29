@@ -123,40 +123,43 @@ struct LowQualityView: View {
         let selected = selectedIDs.contains(id)
 
         return VStack(spacing: 4) {
-            AssetThumbnailView(side: 84, localIdentifier: id)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 8)
-                        .stroke(selected ? Color.red : Color.clear, lineWidth: 2.5)
-                )
-                .overlay(alignment: .bottomTrailing) {
-                    if selectable {
-                        Button {
-                            toggleSelection(id)
-                        } label: {
-                            Image(systemName: selected ? "checkmark.circle.fill" : "circle")
-                                .font(.title3)
-                                .symbolRenderingMode(.palette)
-                                .foregroundStyle(.white, selected ? .red : .gray)
-                                .shadow(radius: 2)
-                        }
+            ZStack {
+                // 图片区：点缩略图本体 → 开全屏查看原图。
+                AssetThumbnailView(side: 84, localIdentifier: id)
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .onTapGesture { viewerAssetID = id }
+
+                // 红色边框：选中态外圈。
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(selected ? Color.red : Color.clear, lineWidth: 2.5)
+                    .allowsHitTesting(false)
+            }
+            .overlay(alignment: .bottomTrailing) {
+                if selectable {
+                    // 右下角勾选圆钮：独立点击目标，不被 onTapGesture 吞掉。
+                    Button { toggleSelection(id) } label: {
+                        Image(systemName: selected ? "checkmark.circle.fill" : "circle")
+                            .font(.title3)
+                            .symbolRenderingMode(.palette)
+                            .foregroundStyle(.white, selected ? .red : .gray)
+                            .shadow(radius: 2)
+                    }
+                    .buttonStyle(.borderless)  // 独立触控目标，确保不被上层 onTapGesture 拦截
+                    .padding(4)
+                } else {
+                    Image(systemName: "moon.stars.fill")
+                        .font(.caption)
+                        .foregroundStyle(.yellow)
                         .padding(4)
-                    } else {
-                        Image(systemName: "moon.stars.fill")
-                            .font(.caption)
-                            .foregroundStyle(.yellow)
-                            .padding(4)
-                            .background(.ultraThinMaterial, in: Circle())
-                    }
+                        .background(.ultraThinMaterial, in: Circle())
+                        .allowsHitTesting(false)
                 }
-                .contentShape(Rectangle())
-                .onTapGesture {
-                    viewerAssetID = id
+            }
+            .contextMenu {
+                if selectable {
+                    Button("不是低质量，移出候选") { moveOut(id) }
                 }
-                .contextMenu {
-                    Button("不是低质量，移出候选") {
-                        moveOut(id)
-                    }
-                }
+            }
 
             Text(kindLabel(candidate))
                 .font(.caption2)
