@@ -93,6 +93,22 @@ struct DeletionReviewView: View {
             }
             .listStyle(.insetGrouped)
 
+            // 全选所有建议删除按钮
+            Button {
+                selectAllPreselectable()
+            } label: {
+                HStack {
+                    Image(systemName: "checkmark.circle.fill")
+                    Text("全选所有建议删除（\(totalPreselectableCount) 张）")
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 8)
+            }
+            .buttonStyle(.bordered)
+            .tint(.red)
+            .padding(.horizontal)
+            .padding(.top, 4)
+
             Button {
                 confirmDeletion()
             } label: {
@@ -169,6 +185,13 @@ struct DeletionReviewView: View {
             selectedIDs.remove(id)
         } else {
             selectedIDs.insert(id)
+        }
+    }
+
+    /// 全选所有组的建议删除项
+    private func selectAllPreselectable() {
+        for group in displayableGroups {
+            selectedIDs.formUnion(group.preselectableIDs)
         }
     }
 

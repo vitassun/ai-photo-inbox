@@ -14,6 +14,7 @@ struct LargeMediaView: View {
     @State private var isDeleting = false
     @State private var statusText: String?
     @State private var showOffloaded = false
+    @State private var viewerAssetID: String?
 
     /// 本机可清理（locally_available）与 iCloud 未下载两组。
     private var localCandidates: [LargeMediaCandidate] {
@@ -58,6 +59,14 @@ struct LargeMediaView: View {
         }
         .navigationTitle("大媒体清理")
         .onAppear(perform: reload)
+        .fullScreenCover(item: Binding(
+            get: { viewerAssetID.map { SingleAssetViewerContext(id: $0) } },
+            set: { viewerAssetID = $0?.id }
+        )) { context in
+            SinglePhotoViewer(localIdentifier: context.id) {
+                viewerAssetID = nil
+            }
+        }
     }
 
     private var listSpacer: some View { Spacer(minLength: 0) }
@@ -114,6 +123,9 @@ struct LargeMediaView: View {
 
         return HStack(spacing: 12) {
             AssetThumbnailView(side: 52, localIdentifier: id)
+                .onTapGesture {
+                    viewerAssetID = id
+                }
 
             VStack(alignment: .leading, spacing: 3) {
                 Text(mediaTitle(candidate)).font(.subheadline.weight(.medium))

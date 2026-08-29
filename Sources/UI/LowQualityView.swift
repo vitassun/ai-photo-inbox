@@ -15,6 +15,7 @@ struct LowQualityView: View {
     @State private var isDeleting = false
     @State private var statusText: String?
     @State private var showExempted = false
+    @State private var viewerAssetID: String?
 
     private var exempted: [LowQualityCandidate] {
         candidates.filter(\.isNightExempt)
@@ -45,6 +46,14 @@ struct LowQualityView: View {
         }
         .navigationTitle("低质量清理")
         .onAppear(perform: reload)
+        .fullScreenCover(item: Binding(
+            get: { viewerAssetID.map { SingleAssetViewerContext(id: $0) } },
+            set: { viewerAssetID = $0?.id }
+        )) { context in
+            SinglePhotoViewer(localIdentifier: context.id) {
+                viewerAssetID = nil
+            }
+        }
     }
 
     private var gridList: some View {
@@ -80,8 +89,18 @@ struct LowQualityView: View {
     private func kindSection(_ kind: LowQualityKind, title: String) -> some View {
         let rows = actionable.filter { $0.kind == kind }
         if !rows.isEmpty {
-            Section("\(title) · \(rows.count) 张") {
+            Section {
                 grid(rows, selectable: true)
+            } header: {
+                HStack {
+                    Text("\(title) · \(rows.count) 张")
+                    Spacer()
+                    Button("全选") {
+                        let ids = rows.map { $0.record.localIdentifier }
+                        selectedIDs.formUnion(ids)
+                    }
+                    .font(.caption)
+                }
             }
         }
     }
@@ -130,6 +149,9 @@ struct LowQualityView: View {
                     }
                 }
                 .contentShape(Rectangle())
+                .onTapGesture {
+                    viewerAssetID = id
+                }
                 .contextMenu {
                     Button("不是低质量，移出候选") {
                         moveOut(id)
@@ -210,6 +232,84 @@ struct LowQualityView: View {
                 statusText = "未执行删除\(error.map { "：\($0.localizedDescription)" } ?? "。")可重试。"
             }
             reload()
+        }
+    }
+}
+
+/// 单张图片查看器上下文
+struct SingleAssetViewerContext: Identifiable {
+    let id: String
+}
+
+/// 单张图片全屏查看器
+struct SinglePhotoViewer: View {
+    let localIdentifier: String
+    let onDismiss: () -> Void
+
+    @State private var image: UIImage?
+    @State private var failed = false
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Spacer()
+                Button("完成") { onDismiss() }
+                    .padding()
+            }
+
+            ZStack {
+                Color(.systemBackground)
+                if let image {
+                    Image(uiImage: image)
+                        .resizable()
+                        .scaledToFit()
+                        .padding()
+                } else if failed {
+                    VStack(spacing: 12) {
+                        Image(systemName: "photo.badge.exclamationmark")
+                            .font(.system(size: 60))
+                            .foregroundStyle(.secondary)
+                        Text("无法加载图片")
+                            .font(.headline)
+                            .foregroundStyle(.secondary)
+                    }
+                } else {
+                    ProgressView()
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .background(Color(.systemBackground))
+        .onAppear(perform: load)
+    }
+
+    private func load() {
+        guard image == nil, !failed else { return }
+        DispatchQueue.global(qos: .userInitiated).async {
+            guard let asset = PHAsset.fetchAssets(
+                withLocalIdentifiers: [localIdentifier], options: nil
+            ).firstObject else {
+                DispatchQueue.main.async { self.failed = true }
+                return
+            }
+            let options = PHImageRequestOptions()
+            options.deliveryMode = .highQualityFormat
+            options.isNetworkAccessAllowed = false
+            options.isSynchronous = true
+            var delivered: UIImage?
+            PHImageManager.default().requestImage(
+                for: asset,
+                targetSize: CGSize(width: 1600, height: 1600),
+                contentMode: .aspectFit,
+                options: options
+            ) { img, _ in delivered = img }
+            DispatchQueue.main.async {
+                if let img = delivered {
+                    self.image = img
+                } else {
+                    self.failed = true
+                }
+            }
         }
     }
 }
