@@ -65,9 +65,7 @@ final class AppEnvironment: ObservableObject {
             hasUserData: false   // V1 冷启动；用户反馈历史属后续迭代
         )
 
-        llmClient = MockLLMClient(),
-            isLiveMode: { [store] in CloudConsent.isEnabled(store: store) }
-        )
+        llmClient = MockLLMClient()
     }
 
     /// 摘要（打开即算：全部来自本地库计数，不触发扫描——P2 验收口径）。
