@@ -37,8 +37,6 @@ final class ScanningEngine: ScanningEngineProtocol {
     private let embeddingComputer: (Data) -> [Double]?
     /// scoring 阶段的四维特征来源（T08 analyze 的注入点）。
     private let featureAnalyzer: (Data) -> VisionAnalysisResult?
-    /// 截图子管线 OCR 注入（T11）：返回识别文本或 nil（失败/无文本 → 待定）。
-    private let screenshotOCR: (Data) -> String?
     /// 低质量检测注入（T16）：编码图像数据 → EXIF 字典（夜间白名单豁免判定）。
     private let exifReader: (Data) -> [String: Any]?
     /// 低质量检测注入（T16）：编码图像数据 → 曝光直方图占比（过曝/欠曝）。
@@ -72,7 +70,6 @@ final class ScanningEngine: ScanningEngineProtocol {
         hashComputer: @escaping (Data) -> String? = { _ in nil },
         embeddingComputer: @escaping (Data) -> [Double]? = { _ in nil },
         featureAnalyzer: @escaping (Data) -> VisionAnalysisResult? = { _ in nil },
-        screenshotOCR: @escaping (Data) -> String? = { _ in nil },
         exifReader: @escaping (Data) -> [String: Any]? = { _ in nil },
         exposureProbe: @escaping (Data) -> (over: Double, under: Double)? = { _ in nil },
         hasUserData: Bool = false,
@@ -85,7 +82,6 @@ final class ScanningEngine: ScanningEngineProtocol {
         self.hashComputer = hashComputer
         self.embeddingComputer = embeddingComputer
         self.featureAnalyzer = featureAnalyzer
-        self.screenshotOCR = screenshotOCR
         self.exifReader = exifReader
         self.exposureProbe = exposureProbe
         self.hasUserData = hasUserData
@@ -539,7 +535,6 @@ final class ScanningEngine: ScanningEngineProtocol {
         scoredGroupsSnapshot = scored
         snapshotLock.unlock()
 
-        classifyScreenshots()
         detectLowQuality()
         detectLargeMedia()
 
@@ -547,38 +542,6 @@ final class ScanningEngine: ScanningEngineProtocol {
         publishSnapshot()
         reportProgress()
         return true
-    }
-
-    /// 截图子管线（T11）：对 isScreenshot 资产跑 OCR + 规则分类，
-    /// 结论落 screenshot_classifications 表。已分类的跳过（续扫不重复）。
-    /// 无 OCR 注入时空转（CI 默认路径；生产构造处传 VisionAnalysisService.readTextSync）。
-    private func classifyScreenshots() {
-        let existing = Set(database.screenshotClassificationAssetIds())
-        for record in fetchedRecords where record.isScreenshot {
-            guard !existing.contains(record.localIdentifier),
-                  let data = imageDataLoader(record.localIdentifier) else { continue }
-
-            let text = screenshotOCR(data)
-            let aspectRatio = Double(record.pixelHeight) / Double(max(record.pixelWidth, 1))
-            let verdict = ScreenshotRuleClassifier.classify(
-                ocrText: text,
-                isScreenshot: record.isScreenshot,
-                aspectRatio: aspectRatio
-            )
-            database.upsertScreenshotClassification(
-                PhotoLibraryDatabase.ScreenshotClassification(
-                    assetId: record.localIdentifier,
-                    category: verdict.category,
-                    confidence: verdict.confidence,
-                    extractedFieldsJSON: verdict.extractedFieldsJSON,
-                    suggestedAction: verdict.suggestedAction,
-                    temporaryLikelihood: verdict.temporaryLikelihood,
-                    source: "rule",
-                    classifiedAt: Date(),
-                    ocrText: text ?? ""
-                )
-            )
-        }
     }
 
     /// 低质量检测 pass（T16）：未被相似组认领的 image 资产，clarity 阈值 +

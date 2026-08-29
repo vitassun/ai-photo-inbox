@@ -160,7 +160,6 @@ final class LowQualityDetectorTests: XCTestCase {
                     aesthetics: 0.5, faceQuality: 0.5, saliency: 0.5
                 )
             },
-            screenshotOCR: { _ in nil },
             exifReader: { data in
                 let id = String(decoding: data, as: UTF8.self)
                 return id == "blurry-night" ? ["ExposureTime": 2.0] : nil
@@ -219,7 +218,6 @@ final class LowQualityDetectorTests: XCTestCase {
             featureAnalyzer: { _ in
                 VisionAnalysisResult(clarity: 0.02, aesthetics: 0.5, faceQuality: 0.5, saliency: 0.5)
             },
-            screenshotOCR: { _ in nil },
             exifReader: { _ in nil },
             exposureProbe: { _ in (over: 0, under: 0) },
             workQueue: queue
@@ -255,7 +253,6 @@ final class LowQualityDetectorTests: XCTestCase {
             featureAnalyzer: { _ in
                 VisionAnalysisResult(clarity: 0.02, aesthetics: 0.5, faceQuality: 0.5, saliency: 0.5)
             },
-            screenshotOCR: { _ in nil },
             exifReader: { _ in nil },
             exposureProbe: { _ in (over: 0, under: 0) },
             workQueue: queue

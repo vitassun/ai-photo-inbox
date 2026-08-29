@@ -143,51 +143,6 @@ final class PhotoLibraryDatabaseTests: XCTestCase {
         )
     }
 
-    // MARK: screenshot_classifications 表（含 CHECK 约束与默认值）
-
-    func testScreenshotClassificationsRoundTripAndDefaults() throws {
-        let database = try makeDatabase()
-        database.upsert(asset: makeAsset(id: "S"), fetchedAt: Date())
-
-        var classification = PhotoLibraryDatabase.ScreenshotClassification(
-            assetId: "S", category: "courier", confidence: 0.92,
-            extractedFieldsJSON: #"{"tracking_no":"SF1234567890"}"#,
-            suggestedAction: "extract_tracking", temporaryLikelihood: 0.8,
-            source: "rule", classifiedAt: Date(timeIntervalSince1970: 1_800_000_002)
-        )
-        database.upsertScreenshotClassification(classification)
-
-        let stored = try XCTUnwrap(database.screenshotClassification(assetId: "S"))
-        XCTAssertEqual(stored.category, "courier")
-        XCTAssertEqual(stored.confidence, 0.92, accuracy: 0.0001)
-        XCTAssertEqual(stored.extractedFieldsJSON, classification.extractedFieldsJSON)
-        XCTAssertEqual(stored.suggestedAction, "extract_tracking")
-        XCTAssertEqual(stored.temporaryLikelihood, 0.8, accuracy: 0.0001)
-        XCTAssertEqual(stored.source, "rule")
-        XCTAssertEqual(stored.classifiedAt.timeIntervalSince1970, 1_800_000_002, accuracy: 0.001)
-
-        // 覆写 + 非默认 source
-        classification.category = "receipt"
-        classification.source = "llm"
-        database.upsertScreenshotClassification(classification)
-        XCTAssertEqual(try XCTUnwrap(database.screenshotClassification(assetId: "S")).category, "receipt")
-        XCTAssertEqual(try XCTUnwrap(database.screenshotClassification(assetId: "S")).source, "llm")
-    }
-
-    func testScreenshotClassificationsRejectsCategoryOutsideCheckConstraint() throws {
-        let database = try makeDatabase()
-        database.upsert(asset: makeAsset(id: "S"), fetchedAt: Date())
-        XCTAssertThrowsError(
-            try database.executeRaw(
-                sql: """
-                INSERT INTO screenshot_classifications
-                  (asset_id, category, confidence, suggested_action, temporary_likelihood, classified_at)
-                VALUES ('S', 'meme', 0.5, 'none', 0.5, 1)
-                """,
-                arguments: []
-            )
-        )
-    }
 
     // MARK: 迁移：升级路径与幂等
 

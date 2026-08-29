@@ -365,7 +365,6 @@ final class ScanningEngineTests: XCTestCase {
             featureAnalyzer: { _ in
                 VisionAnalysisResult(clarity: 0.8, aesthetics: 0.5, faceQuality: 0.5, saliency: 0.5)
             },
-            screenshotOCR: { _ in nil },
             exifReader: { _ in nil },
             exposureProbe: { _ in (over: 0, under: 0) },
             workQueue: queue

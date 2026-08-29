@@ -60,7 +60,6 @@ struct DailyInboxView: View {
             HStack(spacing: 12) {
                 statCard("新增", "\(summary.newAssetCount)", "photo.on.rectangle")
                 statCard("待确认", "\(summary.pendingDeletionCount)", "checkmark.seal")
-                statCard("任务", "\(summary.actionCount)", "checklist")
             }
         }
     }
@@ -110,13 +109,6 @@ struct DailyInboxView: View {
                     entryRow(icon: "square.stack.3d.down.right", title: "待删确认清单",
                              badge: environment.engine.scoredGroups
                                 .reduce(0) { $0 + $1.preselectableIDs.count })
-                }
-
-                NavigationLink {
-                    ScreenshotInboxView(environment: environment)
-                } label: {
-                    entryRow(icon: "doc.text.viewfinder", title: "截图任务箱",
-                             badge: environment.pendingTaskCount())
                 }
 
                 NavigationLink {

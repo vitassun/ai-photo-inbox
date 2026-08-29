@@ -67,47 +67,4 @@ final class CloudConsentTests: XCTestCase {
 
     // MARK: 门闩端到端：关 → 零出网；开 → 放行
 
-    func testResilientClientMakesZeroRequestsWhileConsentOff() async throws {
-        MockURLProtocol.reset()
-        MockURLProtocol.handler = { [response = HTTPURLResponse(
-            url: URL(string: "https://llm.mock.local")!, statusCode: 200,
-            httpVersion: nil, headerFields: nil
-        )!] _ in
-            (response, Data(#"{"category":"courier","confidence":0.9,"extracted_fields":{},"suggested_action":"copy_text","temporary_likelihood":0.5}"#.utf8))
-        }
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.protocolClasses = [MockURLProtocol.self]
-        let session = URLSession(configuration: configuration)
-
-        let database = try! PhotoLibraryDatabase.inMemory()
-        let store = GRDBKeyValueStore(database: database)
-
-        let client = ResilientLLMClient(
-            remote: RemoteLLMClient(
-                baseURL: URL(string: "https://llm.mock.local")!,
-                tokenProvider: { "test-token" },
-                session: session
-            ),
-            fallbackClassify: { ocrText in
-                ScreenshotRuleClassifier.classify(ocrText: ocrText, isScreenshot: true, aspectRatio: 1.8)
-            },
-            isLiveMode: { CloudConsent.isEnabled(store: store) }
-        )
-
-        // 关：走 MOCK 路径，零网络请求。
-        let offResult = try await client.classifyScreenshot(ocrText: "随便一段文本")
-        XCTAssertEqual(MockURLProtocol.requestCount, 0, "未同意时不得有任何出网请求")
-        XCTAssertEqual(offResult.category, "other", "MOCK 无信号文本 → other + 待定")
-        XCTAssertEqual(offResult.suggestedAction, "manual_review")
-
-        // 开：恰好发出一次请求。
-        CloudConsent.setEnabled(true, store: store)
-        _ = try await client.classifyScreenshot(ocrText: "随便一段文本")
-        XCTAssertEqual(MockURLProtocol.requestCount, 1, "同意后放行远端请求")
-
-        // 再关：立刻回落，不再增加请求。
-        CloudConsent.setEnabled(false, store: store)
-        _ = try await client.classifyScreenshot(ocrText: "随便一段文本")
-        XCTAssertEqual(MockURLProtocol.requestCount, 1, "关闭后新请求零出网")
-    }
 }

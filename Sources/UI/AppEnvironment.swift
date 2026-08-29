@@ -48,7 +48,6 @@ final class AppEnvironment: ObservableObject {
                 }
                 return result
             },
-            screenshotOCR: { VisionAnalysisService.readTextSync(imageData: $0) },
             exifReader: { EXIFExtractor.exif(fromEncodedImageData: $0) },
             exposureProbe: { data in
                 // T16 曝光直方图探测：缩略图重采样 128px 后算过曝/欠曝占比。
@@ -66,14 +65,7 @@ final class AppEnvironment: ObservableObject {
             hasUserData: false   // V1 冷启动；用户反馈历史属后续迭代
         )
 
-        llmClient = ResilientLLMClient(
-            remote: RemoteLLMClient(
-                baseURL: AppConfig.llmBaseURL,
-                tokenProvider: { nil }   // 构建注入点（Keychain/环境）；缺失自动降级
-            ),
-            fallbackClassify: { ocrText in
-                ScreenshotRuleClassifier.classify(ocrText: ocrText, isScreenshot: true, aspectRatio: 1.8)
-            },
+        llmClient = MockLLMClient(),
             isLiveMode: { [store] in CloudConsent.isEnabled(store: store) }
         )
     }
@@ -91,11 +83,6 @@ final class AppEnvironment: ObservableObject {
     }
 
     // MARK: T15/T16 页面入口
-
-    /// 截图任务箱待处理数（首页徽标口径：有分类、非待定、未执行过动作）。
-    func pendingTaskCount() -> Int {
-        database.countPendingScreenshotTasks()
-    }
 
     /// 低质量候选快照（引擎镜像读取）。
     func lowQualitySnapshot() -> [LowQualityCandidate] {
