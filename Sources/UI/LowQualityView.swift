@@ -4,6 +4,7 @@
 // 任务卡：T16。红线 6：豁免项永不进预选集合；删除必经系统确认框。
 
 import SwiftUI
+import Photos
 
 struct LowQualityView: View {
     let environment: AppEnvironment
