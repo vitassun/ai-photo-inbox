@@ -133,10 +133,12 @@ final class ScanningEngineTests: XCTestCase {
         let restoredMachine = ScanStateMachine(store: store)
         XCTAssertEqual(restoredMachine.phase, .done)
 
-        // done 后重复 runFullScan 不重扫（状态机不推进）
+        // done 后再次 runFullScan = 全新重扫（真机上"重新扫描"不卡死 UI）
         let callsBefore = fakeService.fetchAllCallCount
         runAndWait(engine, workQueue: queue, progressLog: log)
-        XCTAssertEqual(fakeService.fetchAllCallCount, callsBefore)
+        XCTAssertEqual(engine.state, .done, "重扫完成后再次回到 done")
+        XCTAssertEqual(fakeService.fetchAllCallCount, callsBefore + 1, "重新扫描应再拉一次全库")
+        XCTAssertEqual(database.assetCount(), 3, "幂等 upsert 不产生重复资产行")
     }
 
     // MARK: 杀进程模拟：写入 hashing/0.4 → 重建实例 → 恢复一致
