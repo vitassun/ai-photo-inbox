@@ -97,6 +97,13 @@ final class ScanStateMachine {
         store.setString(String(progress), forKey: Keys.progress)
     }
 
+    /// 手动重置到 idle（用于完成后的全新扫描）。
+    func resetToIdle() {
+        phase = .idle
+        progress = 0
+        persist()
+    }
+
     // MARK: 持久化
 
     private func restoreFromStore() {

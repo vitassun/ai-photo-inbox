@@ -12,6 +12,8 @@ struct DailyInboxView: View {
     @State private var authStatus: PhotoAuthorizationStatus = .notDetermined
     @State private var accessPromptShown = false
     @State private var scanStatusText: String?
+    /// 防重入：防止回调/视图重建导致 startScan() 被连环触发。
+    @State private var isScanning = false
 
     var body: some View {
         ScrollView {
@@ -216,7 +218,7 @@ struct DailyInboxView: View {
             )
         }
         .buttonStyle(.plain)
-        .disabled(scanStatusText?.contains("中") == true)
+        .disabled(isScanning || scanStatusText?.contains("中") == true)
     }
 
     private var scanStatusView: some View {
@@ -494,14 +496,18 @@ struct DailyInboxView: View {
     }
 
     private func startScan() {
+        guard !isScanning else { return }
+        isScanning = true
         scanStatusText = "启动中…"
         environment.engine.runFullScan { [self] phase, progress in
             DispatchQueue.main.async {
                 if phase == .done {
                     self.scanStatusText = "扫描完成 ✓"
                     self.summary = self.environment.todaySummary()
+                    self.isScanning = false
                 } else if case .paused = phase {
                     self.scanStatusText = "已暂停（可点按钮继续）"
+                    self.isScanning = false
                 } else {
                     let name = Self.phaseLabel(phase)
                     self.scanStatusText = "\(name) \(Int((progress * 100).rounded()))%…"
