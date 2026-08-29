@@ -32,6 +32,17 @@ struct DeletionReviewView: View {
         displayableGroups.reduce(0) { $0 + $1.preselectableIDs.count }
     }
 
+    /// 所有组的全部可建议删除 id（跨组，用于全局一键全选/取消全选）。
+    private var allPreselectableIDs: Set<String> {
+        Set(displayableGroups.flatMap(\.preselectableIDs))
+    }
+
+    /// 全局建议项是否已全部选中——用于切换按钮文案。
+    private var allSuggestedSelected: Bool {
+        let target = allPreselectableIDs
+        return !target.isEmpty && target.allSatisfy { selectedIDs.contains($0) }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             if let statusText {
@@ -52,9 +63,13 @@ struct DeletionReviewView: View {
 
             // 全局一键全选所有组的建议删除（跨组操作）。
             if !displayableGroups.isEmpty && totalPreselectableCount > 0 {
-                Button("全选所有建议删除（\(totalPreselectableCount) 张）") {
-                    for group in displayableGroups {
-                        selectedIDs.formUnion(group.preselectableIDs)
+                Button(allSuggestedSelected
+                       ? "取消全选所有建议删除"
+                       : "全选所有建议删除（\(totalPreselectableCount) 张）") {
+                    if allSuggestedSelected {
+                        selectedIDs.subtract(allPreselectableIDs)
+                    } else {
+                        selectedIDs.formUnion(allPreselectableIDs)
                     }
                 }
                 .font(.footnote)
@@ -94,8 +109,13 @@ struct DeletionReviewView: View {
                         HStack {
                             Text("\(shortGroupLabel(group)) · 共 \(group.members.count) 张")
                             Spacer()
-                            Button("全选建议") {
-                                selectedIDs.formUnion(group.preselectableIDs)
+                            let allSelected = group.preselectableIDs.allSatisfy { selectedIDs.contains($0) }
+                            Button(allSelected ? "取消全选" : "全选建议") {
+                                if allSelected {
+                                    selectedIDs.subtract(group.preselectableIDs)
+                                } else {
+                                    selectedIDs.formUnion(group.preselectableIDs)
+                                }
                             }
                             .font(.caption)
                         }

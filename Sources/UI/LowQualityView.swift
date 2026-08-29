@@ -90,15 +90,20 @@ struct LowQualityView: View {
     private func kindSection(_ kind: LowQualityKind, title: String) -> some View {
         let rows = actionable.filter { $0.kind == kind }
         if !rows.isEmpty {
+            let ids = rows.map { $0.record.localIdentifier }
+            let allSelected = !ids.isEmpty && ids.allSatisfy { selectedIDs.contains($0) }
             Section {
                 grid(rows, selectable: true)
             } header: {
                 HStack {
                     Text("\(title) · \(rows.count) 张")
                     Spacer()
-                    Button("全选") {
-                        let ids = rows.map { $0.record.localIdentifier }
-                        selectedIDs.formUnion(ids)
+                    Button(allSelected ? "取消全选" : "全选") {
+                        if allSelected {
+                            selectedIDs.subtract(ids)
+                        } else {
+                            selectedIDs.formUnion(ids)
+                        }
                     }
                     .font(.caption)
                 }
