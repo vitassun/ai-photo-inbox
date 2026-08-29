@@ -46,6 +46,8 @@ struct LowQualityView: View {
             }
         }
         .navigationTitle("低质量清理")
+        .toolbarColorScheme(.dark, for: .navigationBar)
+        .background(Theme.backgroundGradient.ignoresSafeArea())
         .onAppear(perform: reload)
         .fullScreenCover(item: Binding(
             get: { viewerAssetID.map { SingleAssetViewerContext(id: $0) } },

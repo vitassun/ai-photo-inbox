@@ -1,6 +1,6 @@
 // MARK: - SettingsView
-// 职责：设置页（P12）——权限状态面板、云端分析开关（默认关 + 首次显式同意
-//       才可开启）、订阅管理占位、关于。红线 4：未同意前零出网。
+// 职责：设置页（P12）——深色主题适配。权限状态面板、云端分析开关（默认关 + 首次
+//       显式同意才可开启）、订阅管理占位、关于。红线 4：未同意前零出网。
 // 任务卡：T18。
 
 import SwiftUI
@@ -20,13 +20,15 @@ struct SettingsView: View {
             aboutSection
         }
         .navigationTitle("设置")
+        .scrollContentBackground(.hidden)
+        .background(Theme.backgroundGradient.ignoresSafeArea())
+        .tint(Theme.accentBlue)
         .onAppear {
             cloudOn = CloudConsent.isEnabled(store: environment.store)
             authStatus = environment.photoLibraryService.authorizationStatus
         }
         .sheet(isPresented: $showConsentSheet) {
             ConsentSheet { granted in
-                // 唯一开启通道：显式点"同意并开启"。
                 cloudOn = CloudConsent.setEnabled(granted, store: environment.store)
             }
         }
@@ -49,6 +51,7 @@ struct SettingsView: View {
                 }
             }
         }
+        .listRowBackground(Theme.sectionBackground)
     }
 
     // MARK: 云端分析（默认关）
@@ -59,11 +62,9 @@ struct SettingsView: View {
                 get: { cloudOn },
                 set: { newValue in
                     if newValue {
-                        // 开启必须经同意 sheet；先把开关弹回，确认后再置真。
                         cloudOn = false
                         showConsentSheet = true
                     } else {
-                        // 关闭立即生效（T18 验收：24h 内无任何出网请求）。
                         cloudOn = CloudConsent.setEnabled(false, store: environment.store)
                     }
                 }
@@ -73,6 +74,7 @@ struct SettingsView: View {
         } footer: {
             Text("默认关闭。关闭时全部识别在本机完成，零出网请求。")
         }
+        .listRowBackground(Theme.sectionBackground)
     }
 
     // MARK: 订阅管理（占位）与关于
@@ -82,6 +84,7 @@ struct SettingsView: View {
             Text("暂未开放")
                 .foregroundStyle(.secondary)
         }
+        .listRowBackground(Theme.sectionBackground)
     }
 
     private var aboutSection: some View {
@@ -94,6 +97,7 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
             }
         }
+        .listRowBackground(Theme.sectionBackground)
     }
 
     private var appVersion: String {
@@ -103,7 +107,7 @@ struct SettingsView: View {
     }
 }
 
-/// 同意确认 sheet：PRD 指定文案 + 数据去向说明 + 双出口。
+/// 同意确认 sheet：深色主题适配。
 private struct ConsentSheet: View {
     let onDecision: (Bool) -> Void
     @Environment(\.dismiss) private var dismiss
@@ -121,6 +125,7 @@ private struct ConsentSheet: View {
                 Spacer()
             }
             .padding()
+            .background(Theme.backgroundGradient.ignoresSafeArea())
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button("取消") {
@@ -138,6 +143,7 @@ private struct ConsentSheet: View {
             }
             .navigationTitle("云端分析")
             .navigationBarTitleDisplayMode(.inline)
+            .preferredColorScheme(.dark)
         }
     }
 }

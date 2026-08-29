@@ -83,6 +83,8 @@ struct DeletionReviewView: View {
             .padding(.vertical, 8)
         }
         .navigationTitle("待删清单")
+        .toolbarColorScheme(.dark, for: .navigationBar)
+        .background(Theme.backgroundGradient.ignoresSafeArea())
         .fullScreenCover(item: $viewerContext) { context in
             GroupPhotoViewer(
                 group: context.group,
