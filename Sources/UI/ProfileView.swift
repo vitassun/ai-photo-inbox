@@ -53,20 +53,23 @@ struct ProfileView: View {
     private var menuSection: some View {
         VStack(spacing: 0) {
             menuRow(icon: "gearshape", title: "设置", color: .gray) {
-                // NavigationLink to SettingsView handled by parent
+                SettingsView(environment: environment)
             }
             Divider().background(Color.white.opacity(0.08)).padding(.leading, 52)
-            menuRow(icon: "bell", title: "通知设置", color: Theme.accentOrange) {}
-            Divider().background(Color.white.opacity(0.08)).padding(.leading, 52)
-            menuRow(icon: "questionmark.circle", title: "帮助与反馈", color: Theme.accentGreen) {}
-            Divider().background(Color.white.opacity(0.08)).padding(.leading, 52)
-            menuRow(icon: "info.circle", title: "关于", color: Theme.accentBlue) {}
+            menuRow(icon: "info.circle", title: "关于", color: Theme.accentBlue) {
+                SettingsView(environment: environment)
+            }
         }
         .background(Theme.sectionBackground, in: RoundedRectangle(cornerRadius: Theme.cornerRadius))
     }
 
-    private func menuRow(icon: String, title: String, color: Color, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
+    private func menuRow<Destination: View>(
+        icon: String,
+        title: String,
+        color: Color,
+        @ViewBuilder destination: () -> Destination
+    ) -> some View {
+        NavigationLink(destination: destination()) {
             HStack(spacing: 14) {
                 Image(systemName: icon)
                     .font(.body)

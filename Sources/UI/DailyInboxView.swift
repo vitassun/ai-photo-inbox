@@ -1,7 +1,7 @@
 // MARK: - DailyInboxView
 // 职责：摘要首页（P2）——深色主题重设计，对齐 Daily Inbox 视觉规范。
-//       今日概览三卡片（渐变）→ 处理入口（扫描按钮）→ 扫描完成入口行（徽标）→
-//       清理成就（环形进度 + 柱状图）。Limited 权限时顶部常驻升级提示。
+//       今日概览三卡片（渐变）→ 处理入口（扫描按钮）→ 扫描完成入口行（徽标）。
+//       Limited 权限时顶部常驻升级提示。
 // 任务卡：T14。
 
 import SwiftUI
@@ -39,9 +39,6 @@ struct DailyInboxView: View {
                 if authStatus == .authorized || authStatus == .limited {
                     completedSection
                 }
-
-                // 清理成就
-                achievementSection
             }
             .padding(.horizontal, 16)
             .padding(.top, 16)
@@ -348,100 +345,6 @@ struct DailyInboxView: View {
         .padding(.horizontal, 14)
         .padding(.vertical, 12)
         .background(Color.white.opacity(0.02))
-    }
-
-    // MARK: - 清理成就
-
-    private var achievementSection: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Text("清理成就")
-                    .font(.headline)
-                    .foregroundStyle(Theme.titleText)
-                Spacer()
-                NavigationLink("查看全部") {
-                    StatsView()
-                }
-                .font(.subheadline)
-                .foregroundStyle(Theme.accentBlue)
-                Image(systemName: "chevron.right")
-                    .font(.caption2)
-                    .foregroundStyle(Theme.accentBlue)
-            }
-
-            HStack(spacing: 16) {
-                // 环形进度
-                ZStack {
-                    Circle()
-                        .stroke(Color.white.opacity(0.08), lineWidth: 8)
-                        .frame(width: 72, height: 72)
-                    Circle()
-                        .trim(from: 0, to: 0.87)
-                        .stroke(
-                            AngularGradient(
-                                colors: [Theme.accentBlue, Theme.accentGreen, Theme.accentBlue],
-                                center: .center
-                            ),
-                            style: StrokeStyle(lineWidth: 8, lineCap: .round)
-                        )
-                        .rotationEffect(.degrees(-90))
-                        .frame(width: 72, height: 72)
-                    Text("87%")
-                        .font(.system(size: 18, weight: .bold, design: .rounded))
-                        .foregroundStyle(Theme.titleText)
-                }
-
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("本月已节省空间")
-                        .font(.caption)
-                        .foregroundStyle(Theme.subtitleText)
-                    Text("约 12.4 GB")
-                        .font(.title2.bold())
-                        .foregroundStyle(Theme.titleText)
-                    HStack(spacing: 3) {
-                        Image(systemName: "arrow.up")
-                            .font(.caption2)
-                        Text("较上月 +3.2 GB")
-                            .font(.caption)
-                    }
-                    .foregroundStyle(Theme.accentGreen)
-                }
-
-                Spacer()
-
-                // 迷你柱状图
-                miniBarChart
-            }
-            .padding(16)
-            .background(Theme.sectionBackground, in: RoundedRectangle(cornerRadius: Theme.cornerRadius))
-        }
-    }
-
-    private var miniBarChart: some View {
-        HStack(alignment: .bottom, spacing: 8) {
-            barColumn(height: 20, label: "1周前")
-            barColumn(height: 48, label: "上周")
-            barColumn(height: 36, label: "本周")
-        }
-        .frame(width: 100)
-    }
-
-    private func barColumn(height: CGFloat, label: String) -> some View {
-        VStack(spacing: 4) {
-            RoundedRectangle(cornerRadius: 3)
-                .fill(
-                    LinearGradient(
-                        colors: [Theme.accentBlue, Theme.accentBlue.opacity(0.4)],
-                        startPoint: .top,
-                        endPoint: .bottom
-                    )
-                )
-                .frame(height: height)
-            Text(label)
-                .font(.system(size: 8))
-                .foregroundStyle(Theme.captionText)
-        }
-        .frame(maxWidth: .infinity)
     }
 
     // MARK: - 空态

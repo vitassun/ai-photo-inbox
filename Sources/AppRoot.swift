@@ -17,13 +17,12 @@ struct AIPhotoInboxApp: App {
     }
 }
 
-/// 根视图：三 Tab 结构（首页 / 统计 / 我的）+ 液态玻璃底部导航栏。
+/// 根视图：两 Tab 结构（首页 / 我的）+ 液态玻璃底部导航栏。
 struct RootTabView: View {
     @State private var selectedTab = 0
 
     private let tabs: [(icon: String, title: String)] = [
         (icon: "house.fill", title: "首页"),
-        (icon: "chart.bar.fill", title: "统计"),
         (icon: "person.fill", title: "我的"),
     ]
 
@@ -37,8 +36,6 @@ struct RootTabView: View {
                         .toolbarColorScheme(.dark, for: .navigationBar)
                 }
             case 1:
-                StatsView()
-            case 2:
                 ProfileView(environment: AppEnvironment.shared)
             default:
                 DailyInboxView()
