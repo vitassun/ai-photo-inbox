@@ -75,10 +75,14 @@ enum PerceptualHash {
         gray.reserveCapacity(side * side)
         for pixel in 0..<(side * side) {
             let offset = pixel * 4
-            let luma = UInt8(
-                max(0, min(255, (299 * Int(rgba[offset]) + 587 * Int(rgba[offset + 1])
-                    + 114 * Int(rgba[offset + 2])) / 1000))
-            )
+            // Keep each channel calculation separate. Swift 6.2 otherwise spends
+            // excessive type-checking time on the nested arithmetic expression.
+            let red = Int(rgba[offset])
+            let green = Int(rgba[offset + 1])
+            let blue = Int(rgba[offset + 2])
+            let weightedSum = 299 * red + 587 * green + 114 * blue
+            let lumaValue = max(0, min(255, weightedSum / 1000))
+            let luma = UInt8(lumaValue)
             gray.append(luma)
         }
         return hash(grayPixels: gray, width: side, height: side)
