@@ -1,4 +1,4 @@
-# iOS CI：XcodeGen 生成工程 → iPhone 16 模拟器跑纯逻辑单测
+# iOS CI：XcodeGen 生成工程 → Xcode 26 / iPhone 16 模拟器跑纯逻辑单测
 # 任务卡：T01。注意：本目录（ios/）将来整体作为独立 git 仓库根，
 # 届时本文件位于仓库的 .github/workflows/ 才会被 GitHub 识别。
 name: ios-ci
@@ -11,7 +11,8 @@ on:
 
 jobs:
   test:
-    runs-on: macos-15
+    # macOS 26 的默认工具链是 Xcode 26，才能编译 SwiftUI 原生 Liquid Glass 分支。
+    runs-on: macos-26
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -92,7 +93,8 @@ jobs:
   # 免签名设备构建：产出 Payload zip（下载后改名 .ipa 喂 Sideloadly）。
   # 免费签名路线不需要开发者账号；签名动作在用户本机的 Sideloadly 完成。
   device-build:
-    runs-on: macos-15
+    # 与测试任务保持同一套 Xcode 26 工具链，产出的 IPA 才包含原生 Liquid Glass。
+    runs-on: macos-26
     steps:
       - name: Checkout
         uses: actions/checkout@v4

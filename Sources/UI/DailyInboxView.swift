@@ -44,7 +44,7 @@ struct DailyInboxView: View {
             }
             .padding(.horizontal, 16)
             .padding(.top, 16)
-            .padding(.bottom, 110) // 为底部 Tab 栏留空间
+            .padding(.bottom, 24)
         }
         .scrollIndicators(.hidden)
         .onAppear(perform: refresh)

@@ -59,6 +59,7 @@ struct LowQualityView: View {
             }
         }
         .navigationTitle("低质量清理")
+        .toolbar(.hidden, for: .tabBar)
         .toolbarColorScheme(.dark, for: .navigationBar)
         .background(Theme.backgroundGradient.ignoresSafeArea())
         .onAppear {

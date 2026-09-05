@@ -78,6 +78,7 @@ struct LargeMediaView: View {
             }
         }
         .navigationTitle("大媒体清理")
+        .toolbar(.hidden, for: .tabBar)
         .toolbarColorScheme(.dark, for: .navigationBar)
         .background(Theme.backgroundGradient.ignoresSafeArea())
         .onAppear {

@@ -88,6 +88,7 @@ struct DeletionReviewView: View {
             .padding(.vertical, 8)
         }
         .navigationTitle("待删清单")
+        .toolbar(.hidden, for: .tabBar)
         .toolbarColorScheme(.dark, for: .navigationBar)
         .background(Theme.backgroundGradient.ignoresSafeArea())
         .onAppear { tabBarState.isHidden = true }
@@ -531,6 +532,7 @@ struct RecentlyDeletedEducationView: View {
             .padding()
         }
         .navigationTitle("关于最近删除")
+        .toolbar(.hidden, for: .tabBar)
         .onAppear { tabBarState.isHidden = true }
         .onDisappear { tabBarState.isHidden = false }
     }

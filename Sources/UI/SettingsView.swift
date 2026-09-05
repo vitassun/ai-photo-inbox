@@ -22,6 +22,7 @@ struct SettingsView: View {
             aboutSection
         }
         .navigationTitle("设置")
+        .toolbar(.hidden, for: .tabBar)
         .scrollContentBackground(.hidden)
         .background(Theme.backgroundGradient.ignoresSafeArea())
         .tint(Theme.accentBlue)

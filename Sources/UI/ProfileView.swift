@@ -8,23 +8,21 @@ struct ProfileView: View {
     let environment: AppEnvironment
 
     var body: some View {
-        NavigationStack {
-            ScrollView {
-                VStack(spacing: 20) {
-                    // 头像区域
-                    profileHeader
+        ScrollView {
+            VStack(spacing: 20) {
+                // 头像区域
+                profileHeader
 
-                    // 功能列表
-                    menuSection
-                }
-                .padding(.horizontal, 16)
-                .padding(.top, 16)
-                .padding(.bottom, 100)
+                // 功能列表
+                menuSection
             }
-            .background(Theme.backgroundGradient.ignoresSafeArea())
-            .navigationTitle("我的")
-            .toolbarColorScheme(.dark, for: .navigationBar)
+            .padding(.horizontal, 16)
+            .padding(.top, 16)
+            .padding(.bottom, 24)
         }
+        .background(Theme.backgroundGradient.ignoresSafeArea())
+        .navigationTitle("我的")
+        .toolbarColorScheme(.dark, for: .navigationBar)
     }
 
     private var profileHeader: some View {
@@ -112,6 +110,7 @@ private struct AboutView: View {
             .padding()
         }
         .navigationTitle("关于")
+        .toolbar(.hidden, for: .tabBar)
         .background(Theme.backgroundGradient.ignoresSafeArea())
         .onAppear { tabBarState.isHidden = true }
         .onDisappear { tabBarState.isHidden = false }
