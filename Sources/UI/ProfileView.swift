@@ -94,6 +94,8 @@ struct ProfileView: View {
 }
 
 private struct AboutView: View {
+    @EnvironmentObject private var tabBarState: RootTabBarState
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
@@ -111,6 +113,8 @@ private struct AboutView: View {
         }
         .navigationTitle("关于")
         .background(Theme.backgroundGradient.ignoresSafeArea())
+        .onAppear { tabBarState.isHidden = true }
+        .onDisappear { tabBarState.isHidden = false }
     }
 
     private var version: String {

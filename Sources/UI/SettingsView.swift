@@ -8,6 +8,7 @@ import SwiftUI
 struct SettingsView: View {
     let environment: AppEnvironment
     @Environment(\.scenePhase) private var scenePhase
+    @EnvironmentObject private var tabBarState: RootTabBarState
 
     @State private var cloudOn = false
     @State private var showConsentSheet = false
@@ -25,8 +26,10 @@ struct SettingsView: View {
         .background(Theme.backgroundGradient.ignoresSafeArea())
         .tint(Theme.accentBlue)
         .onAppear {
+            tabBarState.isHidden = true
             refreshStatus()
         }
+        .onDisappear { tabBarState.isHidden = false }
         .onChange(of: scenePhase) { phase in
             if phase == .active { refreshStatus() }
         }

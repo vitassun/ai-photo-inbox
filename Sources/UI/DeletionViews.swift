@@ -15,6 +15,7 @@ struct DeletionReviewView: View {
     /// 候选组（已过 SafetyRules；preselectableIDs 即可勾选成员）。
     let deletionService: PhotoLibraryServiceProtocol
     let database: PhotoLibraryDatabase
+    @EnvironmentObject private var tabBarState: RootTabBarState
     /// 删除完成回调（刷新清单/组视图）。
     var onDeleted: ([String]) -> Void = { _ in }
 
@@ -76,18 +77,8 @@ struct DeletionReviewView: View {
             }
 
             // 全局一键全选所有组的建议删除（跨组操作）。
-            if !displayableGroups.isEmpty && totalPreselectableCount > 0 {
-                Button(allSuggestedSelected
-                       ? "取消全选所有建议删除"
-                       : "全选所有建议删除（\(totalPreselectableCount) 张）") {
-                    if allSuggestedSelected {
-                        selectedIDs.subtract(allPreselectableIDs)
-                    } else {
-                        selectedIDs.formUnion(allPreselectableIDs)
-                    }
-                }
-                .font(.footnote)
-                .padding(.bottom, 4)
+            if !allPreselectableIDs.isEmpty {
+                suggestionToggle
             }
 
             NavigationLink("为什么删除的照片还能找回 30 天？") {
@@ -99,6 +90,8 @@ struct DeletionReviewView: View {
         .navigationTitle("待删清单")
         .toolbarColorScheme(.dark, for: .navigationBar)
         .background(Theme.backgroundGradient.ignoresSafeArea())
+        .onAppear { tabBarState.isHidden = true }
+        .onDisappear { tabBarState.isHidden = false }
         .fullScreenCover(item: $viewerContext) { context in
             GroupPhotoViewer(
                 group: context.group,
@@ -106,6 +99,21 @@ struct DeletionReviewView: View {
                 selectedIDs: $selectedIDs
             )
         }
+    }
+
+    private var suggestionToggle: some View {
+        Button(allSuggestedSelected ? "取消全选" : "全选建议") {
+            if allSuggestedSelected {
+                selectedIDs.subtract(allPreselectableIDs)
+            } else {
+                selectedIDs.formUnion(allPreselectableIDs)
+            }
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.regular)
+        .frame(maxWidth: .infinity)
+        .padding(.horizontal)
+        .padding(.vertical, 4)
     }
 
     private var groupedList: some View {
@@ -498,6 +506,8 @@ struct AssetThumbnailView: View {
 
 /// 最近删除教育页（T10 目标第三条）。
 struct RecentlyDeletedEducationView: View {
+    @EnvironmentObject private var tabBarState: RootTabBarState
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
@@ -521,6 +531,8 @@ struct RecentlyDeletedEducationView: View {
             .padding()
         }
         .navigationTitle("关于最近删除")
+        .onAppear { tabBarState.isHidden = true }
+        .onDisappear { tabBarState.isHidden = false }
     }
 
     private func educationBlock(title: String, body text: String) -> some View {

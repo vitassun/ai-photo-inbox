@@ -9,6 +9,7 @@ import Photos
 struct LowQualityView: View {
     @ObservedObject var environment: AppEnvironment
     @Environment(\.scenePhase) private var scenePhase
+    @EnvironmentObject private var tabBarState: RootTabBarState
     /// 删除完成回调（首页刷新摘要）。
     var onDeleted: ([String]) -> Void = { _ in }
 
@@ -27,6 +28,14 @@ struct LowQualityView: View {
         candidates.filter { !$0.isNightExempt }
     }
 
+    private var allSuggestedIDs: Set<String> {
+        Set(actionable.map(\.record.localIdentifier))
+    }
+
+    private var allSuggestedSelected: Bool {
+        !allSuggestedIDs.isEmpty && allSuggestedIDs.allSatisfy { selectedIDs.contains($0) }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             if let statusText {
@@ -34,6 +43,9 @@ struct LowQualityView: View {
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                     .padding(8)
+            }
+            if !allSuggestedIDs.isEmpty {
+                suggestionToggle
             }
             if actionable.isEmpty && exempted.isEmpty {
                 ContentUnavailableView(
@@ -49,7 +61,11 @@ struct LowQualityView: View {
         .navigationTitle("低质量清理")
         .toolbarColorScheme(.dark, for: .navigationBar)
         .background(Theme.backgroundGradient.ignoresSafeArea())
-        .onAppear(perform: reload)
+        .onAppear {
+            tabBarState.isHidden = true
+            reload()
+        }
+        .onDisappear { tabBarState.isHidden = false }
         .onChange(of: scenePhase) { phase in
             if phase == .active { reload() }
         }
@@ -61,6 +77,21 @@ struct LowQualityView: View {
                 viewerAssetID = nil
             }
         }
+    }
+
+    private var suggestionToggle: some View {
+        Button(allSuggestedSelected ? "取消全选" : "全选建议") {
+            if allSuggestedSelected {
+                selectedIDs.subtract(allSuggestedIDs)
+            } else {
+                selectedIDs.formUnion(allSuggestedIDs)
+            }
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.regular)
+        .frame(maxWidth: .infinity)
+        .padding(.horizontal)
+        .padding(.vertical, 4)
     }
 
     private var gridList: some View {
@@ -104,7 +135,7 @@ struct LowQualityView: View {
                 HStack {
                     Text("\(title) · \(rows.count) 张")
                     Spacer()
-                    Button(allSelected ? "取消全选" : "全选") {
+                    Button(allSelected ? "取消全选" : "全选建议") {
                         if allSelected {
                             selectedIDs.subtract(ids)
                         } else {

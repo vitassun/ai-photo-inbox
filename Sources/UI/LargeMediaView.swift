@@ -8,6 +8,7 @@ import SwiftUI
 struct LargeMediaView: View {
     @ObservedObject var environment: AppEnvironment
     @Environment(\.scenePhase) private var scenePhase
+    @EnvironmentObject private var tabBarState: RootTabBarState
     var onDeleted: ([String]) -> Void = { _ in }
 
     @State private var candidates: [LargeMediaCandidate] = []
@@ -24,6 +25,14 @@ struct LargeMediaView: View {
 
     private var offloadedCandidates: [LargeMediaCandidate] {
         candidates.filter { !$0.record.locallyAvailable }
+    }
+
+    private var allSuggestedIDs: Set<String> {
+        Set(localCandidates.map(\.record.localIdentifier))
+    }
+
+    private var allSuggestedSelected: Bool {
+        !allSuggestedIDs.isEmpty && allSuggestedIDs.allSatisfy { selectedIDs.contains($0) }
     }
 
     /// 勾选集的可释放估算（仅本机资产可勾选）。
@@ -46,6 +55,9 @@ struct LargeMediaView: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            if !allSuggestedIDs.isEmpty {
+                suggestionToggle
+            }
             summaryHeader
             if let statusText {
                 Text(statusText)
@@ -68,7 +80,11 @@ struct LargeMediaView: View {
         .navigationTitle("大媒体清理")
         .toolbarColorScheme(.dark, for: .navigationBar)
         .background(Theme.backgroundGradient.ignoresSafeArea())
-        .onAppear(perform: reload)
+        .onAppear {
+            tabBarState.isHidden = true
+            reload()
+        }
+        .onDisappear { tabBarState.isHidden = false }
         .onChange(of: scenePhase) { phase in
             if phase == .active { reload() }
         }
@@ -96,6 +112,21 @@ struct LargeMediaView: View {
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, 8)
+    }
+
+    private var suggestionToggle: some View {
+        Button(allSuggestedSelected ? "取消全选" : "全选建议") {
+            if allSuggestedSelected {
+                selectedIDs.subtract(allSuggestedIDs)
+            } else {
+                selectedIDs.formUnion(allSuggestedIDs)
+            }
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.regular)
+        .frame(maxWidth: .infinity)
+        .padding(.horizontal)
+        .padding(.vertical, 4)
     }
 
     private var mediaList: some View {
