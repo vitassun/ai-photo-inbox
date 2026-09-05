@@ -1,4 +1,4 @@
-# iOS CI：XcodeGen 生成工程 → Xcode 26 / iPhone 16 模拟器跑纯逻辑单测
+# iOS CI：XcodeGen 生成工程 → Xcode 26 / iPhone 17 模拟器跑纯逻辑单测
 # 任务卡：T01。注意：本目录（ios/）将来整体作为独立 git 仓库根，
 # 届时本文件位于仓库的 .github/workflows/ 才会被 GitHub 识别。
 name: ios-ci
@@ -56,12 +56,12 @@ jobs:
       - name: List available simulators (debug aid)
         run: xcrun simctl list devices available | head -n 30
 
-      - name: Run unit tests (iPhone 16 simulator)
+      - name: Run unit tests (iPhone 17 simulator)
         run: |
           if xcodebuild test \
             -project AIPhotoInbox.xcodeproj \
             -scheme AIPhotoInbox \
-            -destination 'platform=iOS Simulator,name=iPhone 16,OS=latest' \
+            -destination 'platform=iOS Simulator,name=iPhone 17,OS=latest' \
             > /tmp/xcodebuild.log 2>&1; then
             echo "ALL TESTS PASSED"
             # 每个测试套件汇总成一条 ::notice:: 注解（匿名可读核实用例数；
@@ -107,14 +107,24 @@ jobs:
 
       - name: Build unsigned device app (Release / iphoneos)
         run: |
-          xcodebuild \
-            -project AIPhotoInbox.xcodeproj \
-            -scheme AIPhotoInbox \
-            -configuration Release \
-            -destination 'generic/platform=iOS' \
-            -derivedDataPath build \
-            CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY="" \
-            build
+          if xcodebuild \
+              -project AIPhotoInbox.xcodeproj \
+              -scheme AIPhotoInbox \
+              -configuration Release \
+              -destination 'generic/platform=iOS' \
+              -derivedDataPath build \
+              CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY="" \
+              build > /tmp/xcodebuild-device.log 2>&1; then
+            echo "UNSIGNED DEVICE BUILD PASSED"
+          else
+            echo "=== xcodebuild DEVICE BUILD FAILED; extracted errors below ==="
+            grep -E "error:|fatal error:|warning:|BUILD FAILED|Testing failed" \
+              /tmp/xcodebuild-device.log | sort -u | tail -80 | while IFS= read -r line; do
+              echo "::error::$line"
+            done
+            tail -120 /tmp/xcodebuild-device.log
+            exit 1
+          fi
 
       - name: Verify compiled app icon metadata
         run: |
