@@ -141,7 +141,7 @@ final class MockLLMClient: LLMClientProtocol {
         guard !candidates.isEmpty else {
             throw RemoteLLMClient.LLMError.malformedResponse
         }
-        BestShotExplanation(keepIndex: 0, reason: "MOCK：第 0 张综合特征最优（离线确定性结果）")
+        return BestShotExplanation(keepIndex: 0, reason: "MOCK：第 0 张综合特征最优（离线确定性结果）")
     }
 }
 
