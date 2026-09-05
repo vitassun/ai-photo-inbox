@@ -7,6 +7,7 @@ import SwiftUI
 
 struct SettingsView: View {
     let environment: AppEnvironment
+    @Environment(\.scenePhase) private var scenePhase
 
     @State private var cloudOn = false
     @State private var showConsentSheet = false
@@ -24,14 +25,22 @@ struct SettingsView: View {
         .background(Theme.backgroundGradient.ignoresSafeArea())
         .tint(Theme.accentBlue)
         .onAppear {
-            cloudOn = CloudConsent.isEnabled(store: environment.store)
-            authStatus = environment.photoLibraryService.authorizationStatus
+            refreshStatus()
+        }
+        .onChange(of: scenePhase) { phase in
+            if phase == .active { refreshStatus() }
         }
         .sheet(isPresented: $showConsentSheet) {
             ConsentSheet { granted in
                 cloudOn = CloudConsent.setEnabled(granted, store: environment.store)
             }
         }
+    }
+
+    private func refreshStatus() {
+        cloudOn = CloudConsent.isEnabled(store: environment.store)
+        authStatus = environment.photoLibraryService.authorizationStatus
+        environment.startChangeMonitoringIfAuthorized()
     }
 
     // MARK: 相册权限面板
@@ -103,7 +112,12 @@ struct SettingsView: View {
     private var appVersion: String {
         let short = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
         let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String
-        return [short, build].compactMap { $0 }.joined(separator: " (") + (build != nil ? ")" : "")
+        switch (short, build) {
+        case let (short?, build?): return "\(short) (\(build))"
+        case let (short?, nil): return short
+        case let (nil, build?): return build
+        default: return "未知"
+        }
     }
 }
 

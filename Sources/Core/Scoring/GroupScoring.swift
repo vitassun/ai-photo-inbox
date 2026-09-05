@@ -83,12 +83,7 @@ enum GroupScoring {
             isBestShot: true
         )
 
-        // 预删除候选集：强制先过 SafetyRules 红线，再排除 Best Shot 本身。
-        let scoredGroupMembers = CandidateGroup(id: group.id, members: flagged.map(\.record), reason: group.reason)
-        let allowedIDs = Set(SafetyRules.preselectableMembers(in: scoredGroupMembers).map(\.localIdentifier))
-        let preselectable = flagged.dropFirst().compactMap { member -> String? in
-            allowedIDs.contains(member.record.localIdentifier) ? member.record.localIdentifier : nil
-        }
+        let preselectable = preselectableIDs(for: flagged)
 
         return ScoredGroup(
             groupID: group.id,
@@ -96,6 +91,29 @@ enum GroupScoring {
             members: flagged,
             preselectableIDs: preselectable
         )
+    }
+
+    /// 根据已按保留分排序的成员重建预删除集合。
+    /// 删除后刷新内存视图时复用这条规则，避免旧候选 id 残留或绕过 70% 上限。
+    static func preselectableIDs(for members: [ScoredMember]) -> [String] {
+        guard !members.isEmpty else { return [] }
+        let group = CandidateGroup(
+            id: "preselect",
+            members: members.map(\.record),
+            reason: ""
+        )
+        let allowedIDs = Set(SafetyRules.preselectableMembers(in: group).map(\.localIdentifier))
+        // 正常产物中 Best Shot 在首位；同时按标记兜底，避免调用方传入顺序
+        // 异常时把 Best Shot 放进自动删除集合。
+        let bestID = members.first(where: \.isBestShot)?.record.localIdentifier
+            ?? members.first?.record.localIdentifier
+        let eligible = members.compactMap { member -> String? in
+            guard member.record.localIdentifier != bestID,
+                  allowedIDs.contains(member.record.localIdentifier) else { return nil }
+            return member.record.localIdentifier
+        }
+        let maxCount = Int(floor(Double(members.count) * AppConfig.maxPreselectedDeletionRatio))
+        return Array(eligible.suffix(min(maxCount, eligible.count)))
     }
 
     /// 组内冗余度 [0,1]：与其他成员相似度的均值（0=独一无二，1=完全重复）。

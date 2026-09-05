@@ -21,8 +21,15 @@ final class DailyNotificationScheduler {
 
     /// 用户配置的通知时刻（默认 21:00）。
     var notifyHour: Int {
-        get { store.string(forKey: Self.hourKey).flatMap(Int.init) ?? 21 }
-        set { store.setString(String(newValue), forKey: Self.hourKey) }
+        get {
+            guard let value = store.string(forKey: Self.hourKey).flatMap(Int.init),
+                  (0...23).contains(value) else { return 21 }
+            return value
+        }
+        set {
+            guard (0...23).contains(newValue) else { return }
+            store.setString(String(newValue), forKey: Self.hourKey)
+        }
     }
 
     /// 请求授权并安排下一次每日摘要（内容按当时摘要实时生成——

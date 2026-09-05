@@ -66,8 +66,11 @@ final class VisionAnalysisService: VisionAnalysisServiceProtocol {
         // aesthetics：iOS18 美学总分 [-1,1] → [0,1]。模拟器不支持 → 保持 nil → 中性值。
         if let request = try? VNCalculateImageAestheticsScoresRequest(),
            (try? handler.perform([request])) != nil {
-            if let observation = request.results?.first as? ImageAestheticsScoresObservation {
-                aesthetics = (Double(observation.overallScore) + 1) / 2
+            // legacy request 返回 VNImageAestheticsScoresObservation；
+            // ImageAestheticsScoresObservation 是 Swift 新封装类型，强转会让
+            // 真机上的结果静默丢失并一直回退到中性值。
+            if let observation = request.results?.first {
+                aesthetics = max(0, min(1, (Double(observation.overallScore) + 1) / 2))
             }
         }
 
@@ -97,19 +100,22 @@ final class VisionAnalysisService: VisionAnalysisServiceProtocol {
 
     /// CGImage 重绘到 side×side RGBA 后转亮度缓冲。
     static func grayPixels(from cgImage: CGImage, side: Int) -> [UInt8]? {
+        guard side > 0, side <= Int.max / 4 else { return nil }
+        let bytesPerRow = side * 4
+        guard side <= Int.max / bytesPerRow else { return nil }
         guard let context = CGContext(
             data: nil,
             width: side,
             height: side,
             bitsPerComponent: 8,
-            bytesPerRow: side * 4,
+            bytesPerRow: bytesPerRow,
             space: CGColorSpaceCreateDeviceRGB(),
             bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
         ) else { return nil }
 
         context.draw(cgImage, in: CGRect(x: 0, y: 0, width: side, height: side))
         guard let buffer = context.data else { return nil }
-        let rgba = buffer.bindMemory(to: UInt8.self, capacity: side * side * 4)
+        let rgba = buffer.bindMemory(to: UInt8.self, capacity: side * bytesPerRow)
 
         var luma: [UInt8] = []
         luma.reserveCapacity(side * side)
@@ -199,22 +205,37 @@ final class VisionAnalysisService: VisionAnalysisServiceProtocol {
         let count = observation.elementCount
         guard count > 0 else { throw VisionAnalysisError.emptyFeaturePrint }
         let data = observation.data
-        guard data.count == count * VNElementTypeSize(observation.elementType) else {
-            throw VisionAnalysisError.emptyFeaturePrint
-        }
+        let elementSize: Int
         switch observation.elementType {
         case .float:
-            return data.withUnsafeBytes { raw in
+            elementSize = MemoryLayout<Float>.size
+        case .double:
+            elementSize = MemoryLayout<Double>.size
+        default:
+            throw VisionAnalysisError.unsupportedElementType
+        }
+        guard elementSize > 0, count <= Int.max / elementSize,
+              data.count == count * elementSize else {
+            throw VisionAnalysisError.emptyFeaturePrint
+        }
+        let vector: [Double]
+        switch observation.elementType {
+        case .float:
+            vector = data.withUnsafeBytes { raw in
                 let pointer = raw.baseAddress!.assumingMemoryBound(to: Float.self)
                 return UnsafeBufferPointer(start: pointer, count: count).map(Double.init)
             }
         case .double:
-            return data.withUnsafeBytes { raw in
+            vector = data.withUnsafeBytes { raw in
                 let pointer = raw.baseAddress!.assumingMemoryBound(to: Double.self)
                 return UnsafeBufferPointer(start: pointer, count: count).map { $0 }
             }
         default:
             throw VisionAnalysisError.unsupportedElementType
         }
+        guard EmbeddingMath.isUsable(vector) else {
+            throw VisionAnalysisError.emptyFeaturePrint
+        }
+        return vector
     }
 }

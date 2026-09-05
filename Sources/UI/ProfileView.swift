@@ -57,7 +57,7 @@ struct ProfileView: View {
             }
             Divider().background(Color.white.opacity(0.08)).padding(.leading, 52)
             menuRow(icon: "info.circle", title: "关于", color: Theme.accentBlue) {
-                SettingsView(environment: environment)
+                AboutView()
             }
         }
         .background(Theme.sectionBackground, in: RoundedRectangle(cornerRadius: Theme.cornerRadius))
@@ -90,5 +90,37 @@ struct ProfileView: View {
             .padding(.vertical, 14)
         }
         .buttonStyle(.plain)
+    }
+}
+
+private struct AboutView: View {
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                Text("照片整理助手")
+                    .font(.title2.bold())
+                Text("本地分析优先，删除必须经过系统确认框。收藏或编辑过的照片不会进入删除建议。")
+                    .font(.body)
+                    .foregroundStyle(.secondary)
+                Divider()
+                LabeledContent("版本", value: version)
+                LabeledContent("隐私", value: "照片与 EXIF 默认只在本机处理")
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding()
+        }
+        .navigationTitle("关于")
+        .background(Theme.backgroundGradient.ignoresSafeArea())
+    }
+
+    private var version: String {
+        let short = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String
+        switch (short, build) {
+        case let (short?, build?): return "\(short) (\(build))"
+        case let (short?, nil): return short
+        case let (nil, build?): return build
+        default: return "未知"
+        }
     }
 }

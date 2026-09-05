@@ -66,7 +66,8 @@ final class PhotoLibraryChangeMonitor: NSObject, PHPhotoLibraryChangeObserver {
             )
         }
         guard let event else { return }
-        DispatchQueue.main.async { [weak self] in
+        // 明确标注主 actor，避免 Swift 并发检查把协议回调误判为跨 actor 访问。
+        Task { @MainActor [weak self] in
             self?.delegate?.photoLibraryDidChange(event)
         }
     }

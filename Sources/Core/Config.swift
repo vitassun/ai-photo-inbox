@@ -97,6 +97,11 @@ enum AppConfig {
     static let lowQualityOverExposedRatioThreshold = 0.30
     static let lowQualityUnderExposedRatioThreshold = 0.30
 
+    // MARK: 安全预选
+
+    /// 相似组最多允许自动预选的删除比例。向下取整，且 Best Shot 永不计入。
+    static let maxPreselectedDeletionRatio = 0.70
+
     // MARK: T15 截图任务箱
 
     /// PDF 导出用原图采样最大边长（像素）：收据文字可读与内存占用的折中。

@@ -25,9 +25,11 @@ enum DailySummaryAggregator {
         newAssets: [(id: String, date: Date)],
         pendingDeletionIDs: [String],
         actionEvents: [(id: String, date: Date)],
-        dayStart: Date
+        dayStart: Date,
+        calendar: Calendar = .current
     ) -> DailyInboxSummary {
-        let windowEnd = dayStart.addingTimeInterval(86_400)
+        let windowEnd = calendar.date(byAdding: .day, value: 1, to: dayStart)
+            ?? dayStart.addingTimeInterval(86_400)
         let inWindow: (Date) -> Bool = { $0 >= dayStart && $0 < windowEnd }
 
         return DailyInboxSummary(

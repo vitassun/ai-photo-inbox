@@ -229,6 +229,22 @@ final class GroupingTests: XCTestCase {
         XCTAssertTrue(CandidateGrouper.groups(from: [undated, dated], hashByID: ["y": String(repeating: "d", count: 16)]).isEmpty)
     }
 
+    func testCandidateGrouperDoesNotMixMediaTypes() {
+        let base = Date(timeIntervalSince1970: 1_700_000_000)
+        let photo = makeGroupingRecord(id: "photo", seconds: 0)
+        let video = AssetRecord(
+            localIdentifier: "video", favorite: false, isEdited: false,
+            mediaType: .video, pixelWidth: 100, pixelHeight: 100, duration: 3,
+            creationDate: base.addingTimeInterval(10), isScreenshot: false,
+            isLivePhoto: false, latitude: nil, longitude: nil
+        )
+        let hash = String(repeating: "a", count: 16)
+        let groups = CandidateGrouper.groups(
+            from: [photo, video], hashByID: ["photo": hash, "video": hash]
+        )
+        XCTAssertTrue(groups.isEmpty, "照片与视频封面不能仅凭相似哈希互相替代")
+    }
+
     // MARK: 引擎 hashing 阶段集成（假图像源 + 真 pHash）
 
     private func makeRecord(

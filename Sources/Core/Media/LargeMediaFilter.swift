@@ -20,11 +20,14 @@ enum LargeMediaFilter {
     static func candidates(
         from records: [AssetRecord],
         thresholdBytes: Int64 = AppConfig.largeMediaEstimatedBytesThreshold,
-        idsInCandidateGroups: Set<String> = []
+        idsInCandidateGroups: Set<String> = [],
+        idsWithKeepDecision: Set<String> = []
     ) -> [LargeMediaCandidate] {
         records.compactMap { record in
             // 红线 1/2：收藏过、编辑过的资产永不进入任何预选集合。
             guard !record.favorite, !record.isEdited else { return nil }
+            // 用户明确保留过的资产在重扫时也不得重新出现。
+            guard !idsWithKeepDecision.contains(record.localIdentifier) else { return nil }
             // 让位相似组流程：同一资产不同时出现在两个删除候选视图里。
             guard !idsInCandidateGroups.contains(record.localIdentifier) else { return nil }
             guard let bytes = MediaSizeEstimator.estimatedBytes(for: record),

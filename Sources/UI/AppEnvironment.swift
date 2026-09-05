@@ -4,11 +4,12 @@
 // 任务卡：T14。
 
 import Foundation
+import Combine
 import UIKit
 import ImageIO
 
 @MainActor
-final class AppEnvironment: ObservableObject {
+final class AppEnvironment: ObservableObject, PhotoLibraryChangeObserving {
 
     static let shared = AppEnvironment()
 
@@ -16,9 +17,13 @@ final class AppEnvironment: ObservableObject {
     let store: KeyValueStore
     let photoLibraryService: SystemPhotoLibraryService
     private let imageProvider = PhotoKitImageDataProvider()
+    private let changeMonitor: PhotoLibraryChangeMonitor
     let engine: ScanningEngine
-    /// LLM 兜底客户端（T18 接线）：isLiveMode 即云端同意门闩——
-    /// 未同意时零出网（MOCK/规则路径），同意后才放行远端请求。
+    /// PhotoKit 增量事件的 UI 失效标记；候选快照本身由引擎锁保护，
+    /// 这里仅用版本号通知 SwiftUI 重新读取镜像。
+    @Published private(set) var libraryRevision = 0
+    /// LLM 兜底客户端（T18 接线）：CloudConsent 是云端同意门闩——
+    /// 未同意时零出网（本地规则路径），同意后才放行远端请求。
     let llmClient: LLMClientProtocol
 
     init() {
@@ -26,9 +31,18 @@ final class AppEnvironment: ObservableObject {
         try? FileManager.default.createDirectory(at: docs, withIntermediateDirectories: true)
         let dbPath = docs.appendingPathComponent("inbox.sqlite").path
 
-        database = (try? PhotoLibraryDatabase(path: dbPath)) ?? (try! PhotoLibraryDatabase.inMemory())
+        if let diskDatabase = try? PhotoLibraryDatabase(path: dbPath) {
+            database = diskDatabase
+        } else {
+            do {
+                database = try PhotoLibraryDatabase.inMemory()
+            } catch {
+                fatalError("无法创建本地数据库：\(error)")
+            }
+        }
         store = GRDBKeyValueStore(database: database)
         photoLibraryService = SystemPhotoLibraryService()
+        changeMonitor = PhotoLibraryChangeMonitor()
         engine = ScanningEngine(
             photoLibrary: photoLibraryService,
             database: database,
@@ -49,6 +63,10 @@ final class AppEnvironment: ObservableObject {
                 return result
             },
             exifReader: { EXIFExtractor.exif(fromEncodedImageData: $0) },
+            assetExifReader: { [imageProvider] id in
+                guard let data = imageProvider.originalImageData(for: id) else { return nil }
+                return EXIFExtractor.exif(fromEncodedImageData: data)
+            },
             exposureProbe: { data in
                 // T16 曝光直方图探测：缩略图重采样 128px 后算过曝/欠曝占比。
                 guard let gray = VisionAnalysisService.grayPixelsSync(imageData: data, side: 128) else {
@@ -65,19 +83,56 @@ final class AppEnvironment: ObservableObject {
             hasUserData: false   // V1 冷启动；用户反馈历史属后续迭代
         )
 
-        llmClient = MockLLMClient()
+        let remote = RemoteLLMClient(
+            baseURL: AppConfig.llmBaseURL,
+            tokenProvider: { LLMTokenStore.read() }
+        )
+        llmClient = ConsentGatedLLMClient(store: store, remote: remote)
+
+        changeMonitor.delegate = self
     }
 
     /// 摘要（打开即算：全部来自本地库计数，不触发扫描——P2 验收口径）。
     func todaySummary(now: Date = Date()) -> DailyInboxSummary {
         let calendar = Calendar.current
         let dayStart = DailySummaryAggregator.dayStart(for: now, calendar: calendar)
+        let dayEnd = calendar.date(byAdding: .day, value: 1, to: dayStart)
+            ?? dayStart.addingTimeInterval(86_400)
         return DailyInboxSummary(
             dayStart: dayStart,
-            newAssetCount: database.countAssets(createdAtOrAfter: dayStart),
+            newAssetCount: database.countAssets(createdAtOrAfter: dayStart, before: dayEnd),
             pendingDeletionCount: database.countDeleteVerdicts(),
-            actionCount: database.countActions(atOrAfter: dayStart)
+            actionCount: database.countActions(atOrAfter: dayStart, before: dayEnd)
         )
+    }
+
+    /// PhotoKit 外部变更只更新本地索引并清理已删除视图；下一次扫描会重建受影响的候选组。
+    /// 回调由 PhotoLibraryChangeMonitor 保证在主线程投递。
+    func photoLibraryDidChange(_ event: PhotoLibraryChangeEvent) {
+        libraryRevision &+= 1
+        if !event.removedIdentifiers.isEmpty {
+            database.removeAssetsFromLibrary(assetIds: event.removedIdentifiers)
+            engine.purgeDeletedFromViews(assetIds: event.removedIdentifiers)
+        }
+
+        let changedIDs = Array(Set(event.insertedIdentifiers + event.updatedIdentifiers))
+        let fetchedAt = Date()
+        let changedRecords = changedIDs.isEmpty
+            ? []
+            : photoLibraryService.fetchAssets(matching: changedIDs)
+        database.upsert(assets: changedRecords, fetchedAt: fetchedAt)
+        engine.refreshAfterLibraryChange(
+            records: changedRecords,
+            removedIDs: event.removedIdentifiers
+        )
+    }
+
+    /// 只在权限已确定后建立 diff 基准；避免在首次授权前用空 fetch 结果注册，
+    /// 导致授权完成后的首批资产永远不产生 inserted 事件。
+    func startChangeMonitoringIfAuthorized() {
+        guard photoLibraryService.authorizationStatus == .authorized
+            || photoLibraryService.authorizationStatus == .limited else { return }
+        changeMonitor.start()
     }
 
     // MARK: T15/T16 页面入口

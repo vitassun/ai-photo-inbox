@@ -1,5 +1,5 @@
 // MARK: - PhotoLibraryDatabaseTests
-// 职责：T03 持久化层单测——五张表建库迁移、逐字段插读断言、upsert 语义、
+// 职责：T03 持久化层单测——核心表建库迁移、逐字段插读断言、upsert 语义、
 //       featureVersion 脏数据清理、schema 升级路径、GRDB 版 KeyValueStore。
 // 任务卡：T03。全部跑在匿名内存库上，CI 模拟器可验证。
 
@@ -23,7 +23,8 @@ final class PhotoLibraryDatabaseTests: XCTestCase {
         duration: Double = 0,
         creationDate: Date? = Date(timeIntervalSince1970: 1_700_000_000),
         isScreenshot: Bool = false,
-        isLivePhoto: Bool = false
+        isLivePhoto: Bool = false,
+        locallyAvailable: Bool = true
     ) -> AssetRecord {
         AssetRecord(
             localIdentifier: id,
@@ -37,7 +38,8 @@ final class PhotoLibraryDatabaseTests: XCTestCase {
             isScreenshot: isScreenshot,
             isLivePhoto: isLivePhoto,
             latitude: nil,
-            longitude: nil
+            longitude: nil,
+            locallyAvailable: locallyAvailable
         )
     }
 
@@ -82,6 +84,32 @@ final class PhotoLibraryDatabaseTests: XCTestCase {
         XCTAssertEqual(row["favorite"], true)
     }
 
+    func testUpsertUsesRecordLocalAvailabilityByDefault() throws {
+        let database = try makeDatabase()
+        database.upsert(
+            asset: makeAsset(id: "offloaded", locallyAvailable: false),
+            fetchedAt: Date()
+        )
+
+        let row = try XCTUnwrap(database.row(
+            forSQL: "SELECT locally_available FROM assets WHERE local_identifier = 'offloaded'"
+        ))
+        XCTAssertEqual(row["locally_available"], false)
+    }
+
+    func testReplaceAssetSnapshotRemovesMissingRowsAndPreservesCurrentRows() throws {
+        let database = try makeDatabase()
+        database.upsert(asset: makeAsset(id: "stale"), fetchedAt: Date())
+        database.replaceAssetSnapshot(
+            [makeAsset(id: "current")],
+            fetchedAt: Date()
+        )
+
+        XCTAssertEqual(database.assetCount(), 1)
+        XCTAssertNil(database.row(forSQL: "SELECT 1 FROM assets WHERE local_identifier = 'stale'"))
+        XCTAssertNotNil(database.row(forSQL: "SELECT 1 FROM assets WHERE local_identifier = 'current'"))
+    }
+
     // MARK: featureprints 表
 
     func testFeatureprintsRoundTripAndVersionMismatch() throws {
@@ -94,6 +122,36 @@ final class PhotoLibraryDatabaseTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(database.featureprint(assetId: "A", featureVersion: 1)), payload)
         // featureVersion 不符 → 视为不存在（调用方重算）。
         XCTAssertNil(database.featureprint(assetId: "A", featureVersion: 2))
+    }
+
+    func testFeatureKindsCoexistAndAuditDoesNotOverwriteDecision() throws {
+        let database = try makeDatabase()
+        database.upsert(asset: makeAsset(id: "A"), fetchedAt: Date())
+        database.upsertFeatureprint(
+            assetId: "A", data: FeaturePrintCodec.encodeHash(String(repeating: "a", count: 16)),
+            featureVersion: 1, computedAt: Date()
+        )
+        database.upsertFeatureprint(
+            assetId: "A", data: FeaturePrintCodec.encodeEmbedding([1, 0]),
+            featureVersion: 1, computedAt: Date()
+        )
+        database.upsertFeatureprint(
+            assetId: "A", data: FeaturePrintCodec.encodeScores([0.1, 0.2, 0.3, 0.4]),
+            featureVersion: 1, computedAt: Date()
+        )
+
+        XCTAssertEqual(database.featureprintCount(), 3)
+        XCTAssertEqual(database.allFeatureprintHashes(featureVersion: 1)["A"], String(repeating: "a", count: 16))
+        XCTAssertEqual(database.allFeatureprintEmbeddings(featureVersion: 1)["A"] ?? [], [1, 0])
+        XCTAssertEqual(database.allFeatureprintScores(featureVersion: 1)["A"] ?? [], [0.1, 0.2, 0.3, 0.4])
+
+        database.setDecision(assetId: "A", verdict: .delete, reason: "similar_group", decidedAt: Date())
+        database.markActionTaken(assetId: "A", action: "copy_text", at: Date(timeIntervalSince1970: 10))
+        XCTAssertEqual(database.decision(assetId: "A")?.verdict, .delete)
+        XCTAssertEqual(database.countActions(atOrAfter: Date(timeIntervalSince1970: 0), before: Date(timeIntervalSince1970: 20)), 1)
+
+        database.markDeleted(assetIds: ["A"], at: Date(timeIntervalSince1970: 20))
+        XCTAssertEqual(database.countDeleteVerdicts(), 0)
     }
 
     func testPurgeFeatureprintsKeepsCurrentVersion() throws {

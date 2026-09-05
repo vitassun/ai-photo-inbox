@@ -45,19 +45,34 @@ struct PHAssetSnapshot {
     /// localIdentifier 为空的资产剔除（防御 PhotoKit 异常数据）。
     func makeAssetRecord() -> AssetRecord? {
         guard !localIdentifier.isEmpty else { return nil }
+        let mediaType = AssetMediaType(rawValue: mediaTypeRaw) ?? .unknown
+        let safeDuration = mediaType == .video && duration.isFinite
+            ? max(0, duration)
+            : 0
+        let safeLatitude: Double?
+        let safeLongitude: Double?
+        if let latitude, let longitude,
+           latitude.isFinite, longitude.isFinite,
+           (-90...90).contains(latitude), (-180...180).contains(longitude) {
+            safeLatitude = latitude
+            safeLongitude = longitude
+        } else {
+            safeLatitude = nil
+            safeLongitude = nil
+        }
         return AssetRecord(
             localIdentifier: localIdentifier,
             favorite: favorite,
             isEdited: isEdited,
-            mediaType: AssetMediaType(rawValue: mediaTypeRaw) ?? .unknown,
-            pixelWidth: pixelWidth,
-            pixelHeight: pixelHeight,
-            duration: duration,
+            mediaType: mediaType,
+            pixelWidth: max(0, pixelWidth),
+            pixelHeight: max(0, pixelHeight),
+            duration: safeDuration,
             creationDate: creationDate ?? modificationDate,
             isScreenshot: isScreenshot,
             isLivePhoto: isLivePhoto,
-            latitude: latitude,
-            longitude: longitude,
+            latitude: safeLatitude,
+            longitude: safeLongitude,
             locallyAvailable: locallyAvailable
         )
     }
@@ -132,6 +147,10 @@ final class SystemPhotoLibraryService: PhotoLibraryServiceProtocol {
         of identifiers: [String],
         completion: @escaping (Bool, Error?) -> Void
     ) {
+        guard !identifiers.isEmpty else {
+            DispatchQueue.main.async { completion(true, nil) }
+            return
+        }
         // 唯一删除通道：performChanges + deleteAssets，系统弹确认框由用户逐次批准。
         // 超上限自动分批（T10），按批顺序执行；任一批失败（含用户取消确认框）
         // 即停止后续批次——续传语义：调用方以 fetchAssets(matching:) 重查
@@ -231,7 +250,7 @@ extension SystemPhotoLibraryService {
         guard let scene = UIApplication.shared.connectedScenes
             .compactMap({ $0 as? UIWindowScene })
             .first(where: { $0.activationState == .foregroundActive }),
-            let root = scene.keyWindow?.rootViewController else { return }
+            let root = scene.windows.first(where: { $0.isKeyWindow })?.rootViewController else { return }
         PHPhotoLibrary.shared().presentLimitedLibraryPicker(from: root)
     }
 

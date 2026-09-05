@@ -36,9 +36,14 @@ enum LowQualityDetector {
         overRatio: Double?,
         underRatio: Double?
     ) -> LowQualityKind? {
-        let isBlurry = clarity < AppConfig.lowQualityClarityThreshold
-        let isOver = (overRatio ?? 0) >= AppConfig.lowQualityOverExposedRatioThreshold
-        let isUnder = (underRatio ?? 0) >= AppConfig.lowQualityUnderExposedRatioThreshold
+        // 视觉分析失败或数据源返回异常浮点数时，按中性值处理；比例始终限制在
+        // [0, 1]，避免 +∞ 等脏数据直接制造删除候选。
+        let safeClarity = clarity.isFinite ? clarity : 0.5
+        let safeOverRatio = sanitizedRatio(overRatio)
+        let safeUnderRatio = sanitizedRatio(underRatio)
+        let isBlurry = safeClarity < AppConfig.lowQualityClarityThreshold
+        let isOver = safeOverRatio >= AppConfig.lowQualityOverExposedRatioThreshold
+        let isUnder = safeUnderRatio >= AppConfig.lowQualityUnderExposedRatioThreshold
 
         switch (isBlurry, isOver, isUnder) {
         case (false, false, false):
@@ -49,7 +54,7 @@ enum LowQualityDetector {
             return .overexposed
         case (false, false, true):
             return .underexposed
-        case (_, true, _) where (overRatio ?? 0) >= 0.5:
+        case (_, true, _) where safeOverRatio >= 0.5:
             return .overexposed
         case (true, _, true):
             // 糊 + 欠曝且过曝未达主导：欠曝更难挽回，取欠曝。
@@ -63,5 +68,10 @@ enum LowQualityDetector {
     /// 夜间豁免只标记不预选。
     static func preselectable(_ candidate: LowQualityCandidate) -> Bool {
         !candidate.record.favorite && !candidate.record.isEdited && !candidate.isNightExempt
+    }
+
+    private static func sanitizedRatio(_ value: Double?) -> Double {
+        guard let value, value.isFinite else { return 0 }
+        return min(max(value, 0), 1)
     }
 }

@@ -223,10 +223,9 @@ final class ScanningEngineTests: XCTestCase {
         let engine = ScanningEngine(photoLibrary: fakeService, database: database, store: store, workQueue: queue)
         runAndWait(engine, workQueue: queue, progressLog: ProgressLog())
 
-        // 从头重扫 + 脏特征被清（保留当前版本之外全部删除）。
-        // 注：为满足外键而种的 "stale" 资产行本身保留——本卡只清旧版本特征。
+        // 从头重扫 + 脏特征被清；全量快照也会移除不再出现在 PhotoKit 的旧资产行。
         XCTAssertEqual(fakeService.fetchAllCallCount, 1)
-        XCTAssertEqual(database.assetCount(), 3)
+        XCTAssertEqual(database.assetCount(), 2)
         XCTAssertEqual(database.featureprintCount(), 0)
         XCTAssertEqual(engine.state, .done)
     }

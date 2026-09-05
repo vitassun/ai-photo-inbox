@@ -8,6 +8,7 @@ import SwiftUI
 
 struct DailyInboxView: View {
     @StateObject private var environment = AppEnvironment.shared
+    @Environment(\.scenePhase) private var scenePhase
     @State private var summary: DailyInboxSummary?
     @State private var authStatus: PhotoAuthorizationStatus = .notDetermined
     @State private var accessPromptShown = false
@@ -36,7 +37,8 @@ struct DailyInboxView: View {
                 scanEntrySection
 
                 // 扫描完成
-                if authStatus == .authorized || authStatus == .limited {
+                if (authStatus == .authorized || authStatus == .limited),
+                   environment.engine.state == .done {
                     completedSection
                 }
             }
@@ -46,6 +48,9 @@ struct DailyInboxView: View {
         }
         .scrollIndicators(.hidden)
         .onAppear(perform: refresh)
+        .onChange(of: scenePhase) { phase in
+            if phase == .active { refresh() }
+        }
     }
 
     // MARK: - 标题区
@@ -87,7 +92,7 @@ struct DailyInboxView: View {
                     icon: "photo.on.rectangle",
                     value: "\(summary.newAssetCount)",
                     label: "新增",
-                    trend: "+\(max(0, summary.newAssetCount % 10))",
+                    trend: nil,
                     trendUp: true,
                     gradient: Theme.newAssetGradient
                 )
@@ -95,7 +100,7 @@ struct DailyInboxView: View {
                     icon: "checkmark.seal.fill",
                     value: "\(summary.pendingDeletionCount)",
                     label: "待确认",
-                    trend: "-\(min(summary.pendingDeletionCount, 12))",
+                    trend: nil,
                     trendUp: false,
                     gradient: Theme.pendingGradient
                 )
@@ -252,8 +257,9 @@ struct DailyInboxView: View {
                         deletionService: environment.photoLibraryService,
                         database: environment.database,
                         onDeleted: { ids in
-                            environment.engine.purgeDeletedFromViews(assetIds: ids)
-                            refresh()
+                            environment.engine.purgeDeletedFromViews(assetIds: ids) {
+                                DispatchQueue.main.async { refresh() }
+                            }
                         }
                     )
                 } label: {
@@ -385,6 +391,7 @@ struct DailyInboxView: View {
 
     private func refresh() {
         authStatus = environment.photoLibraryService.authorizationStatus
+        environment.startChangeMonitoringIfAuthorized()
         summary = environment.todaySummary()
         if authStatus == .notDetermined && !accessPromptShown {
             accessPromptShown = true
@@ -400,6 +407,11 @@ struct DailyInboxView: View {
 
     private func startScan() {
         guard !isScanning else { return }
+        guard authStatus == .authorized || authStatus == .limited else {
+            scanStatusText = "请先开启相册权限，再开始扫描。"
+            if authStatus == .notDetermined { promptAccess() }
+            return
+        }
         isScanning = true
         scanStatusText = "启动中…"
         environment.engine.runFullScan { [self] phase, progress in

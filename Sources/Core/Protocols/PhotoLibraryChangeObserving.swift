@@ -17,6 +17,7 @@ struct PhotoLibraryChangeEvent: Equatable {
 }
 
 /// 相册变更监听协议。回调保证在主线程投递。
+@MainActor
 protocol PhotoLibraryChangeObserving: AnyObject {
     func photoLibraryDidChange(_ event: PhotoLibraryChangeEvent)
 }

@@ -93,6 +93,11 @@ final class ScanStateMachine {
     /// 更新当前阶段进度（0~1，越界钳制）。非活动阶段忽略。
     func setProgress(_ value: Double) {
         guard isActive else { return }
+        guard value.isFinite else {
+            progress = 0
+            store.setString("0", forKey: Keys.progress)
+            return
+        }
         progress = min(max(value, 0), 1)
         store.setString(String(progress), forKey: Keys.progress)
     }
@@ -102,6 +107,17 @@ final class ScanStateMachine {
         phase = .idle
         progress = 0
         persist()
+    }
+
+    /// 恢复时发现后续阶段所需的中间特征不完整，回退到指定活动阶段重建。
+    /// 这是内部恢复语义，不允许跳到 idle/done/paused，避免绕过正常流水线。
+    @discardableResult
+    func rewind(to target: ScanPhase) -> Bool {
+        guard target.isActive else { return false }
+        phase = target
+        progress = 0
+        persist()
+        return true
     }
 
     // MARK: 持久化
@@ -122,8 +138,10 @@ final class ScanStateMachine {
             phase = restored
         }
         if let saved = store.string(forKey: Keys.progress),
-           let value = Double(saved) {
-            progress = value
+           let value = Double(saved), value.isFinite {
+            progress = min(max(value, 0), 1)
+        } else {
+            progress = 0
         }
     }
 

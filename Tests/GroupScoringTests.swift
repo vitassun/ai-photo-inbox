@@ -268,8 +268,9 @@ final class ScoringStageEngineTests: XCTestCase {
         //（这本身就是冷启动规则的集成级验证）。
         XCTAssertEqual(scored.bestShot?.record.localIdentifier, "asset-3")
 
-        // 预选集：Best Shot（asset-3）与收藏者（同为 asset-3）都不进，其余三张按分排序。
-        XCTAssertEqual(scored.preselectableIDs, ["asset-2", "asset-1", "asset-0"])
+        // 预选集：Best Shot（asset-3）不进，且自动预选最多占组内 70%，
+        // 因此四张中最多两张，取保留分最低的两张。
+        XCTAssertEqual(scored.preselectableIDs, ["asset-1", "asset-0"])
 
         // 分数已落表（信封 kind=3）。
         XCTAssertEqual(

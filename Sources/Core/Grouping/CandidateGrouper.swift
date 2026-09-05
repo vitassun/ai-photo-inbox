@@ -16,7 +16,7 @@ struct GroupingUnit {
 enum CandidateGrouper {
 
     /// 分组规则：
-    ///   1. creationDate 为 nil 的资产不参与（分桶前置过滤语义）。
+    ///   1. creationDate 缺失或非有限的资产不参与（分桶前置过滤语义）。
     ///   2. 时间分桶：间隔 > AppConfig.timeGapThreshold 切开。
     ///   3. 桶内地理切分：有坐标者按半径聚簇；无坐标者共享一个"未知位置"
     ///      单元（截图天然无 EXIF GPS——可行性 §2.3，不能因此排除出粗筛；
@@ -48,7 +48,10 @@ enum CandidateGrouper {
     /// 时间桶 × 地理单元切分（T04 粗筛与 T05 精比聚类共用的前置；
     /// 全局两两比较的禁令以本函数的输出范围为准）。确定性输出。
     static func timeGeoUnits(from records: [AssetRecord]) -> [GroupingUnit] {
-        let dated = records.filter { $0.creationDate != nil }
+        let dated = records.filter {
+            guard let date = $0.creationDate else { return false }
+            return date.timeIntervalSince1970.isFinite
+        }
         guard !dated.isEmpty else { return [] }
 
         let entries = dated.map { (id: $0.localIdentifier, date: $0.creationDate!) }
@@ -65,7 +68,9 @@ enum CandidateGrouper {
             var unknownLocation: [AssetRecord] = []
             var pendingCoords: [GeoPoint] = []
             for member in members {
-                if let lat = member.latitude, let lon = member.longitude {
+                if let lat = member.latitude, let lon = member.longitude,
+                   lat.isFinite, lon.isFinite,
+                   (-90...90).contains(lat), (-180...180).contains(lon) {
                     pendingCoords.append(GeoPoint(id: member.localIdentifier, latitude: lat, longitude: lon))
                 } else {
                     unknownLocation.append(member)
@@ -79,8 +84,15 @@ enum CandidateGrouper {
                 geoUnits.append(members.filter { ids.contains($0.localIdentifier) })
             }
 
+            // 不同媒体类型不能仅凭缩略图相似就互相替代（例如视频封面与照片）。
+            // 在时间×地理单元内再按 mediaType 切分，保证 pHash 与 embedding 两条路径
+            // 都不会跨媒体类型成组。
             for unit in geoUnits {
-                units.append(GroupingUnit(bucketIndex: bucketIndex, members: unit))
+                let byMediaType = Dictionary(grouping: unit, by: { $0.mediaType.rawValue })
+                for mediaType in byMediaType.keys.sorted() {
+                    guard let members = byMediaType[mediaType], !members.isEmpty else { continue }
+                    units.append(GroupingUnit(bucketIndex: bucketIndex, members: members))
+                }
             }
         }
         return units

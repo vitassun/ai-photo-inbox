@@ -33,7 +33,7 @@ struct AssetRecord: Equatable {
     /// 是否 Live Photo（含配对视频组件，删除须原子处理，见 T07/T10）。
     let isLivePhoto: Bool
     /// 拍摄地纬度（度）；无 GPS 信息时为 nil。仅扫描当轮内存使用（分组），
-    /// 五张表 DDL 无对应列、不落库（tech-spec §4 冻结）。
+    /// 资产表 DDL 无对应列、不落库（tech-spec §4 冻结）。
     let latitude: Double?
     /// 拍摄地经度（度）；无 GPS 信息时为 nil。
     let longitude: Double?
@@ -42,5 +42,9 @@ struct AssetRecord: Equatable {
     var locallyAvailable: Bool = true
 
     /// 像素总量，供低质量/大文件启发式参考。
-    var pixelCount: Int { pixelWidth * pixelHeight }
+    var pixelCount: Int {
+        guard pixelWidth > 0, pixelHeight > 0 else { return 0 }
+        let result = pixelWidth.multipliedReportingOverflow(by: pixelHeight)
+        return result.overflow ? Int.max : result.partialValue
+    }
 }

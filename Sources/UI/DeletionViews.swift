@@ -9,11 +9,10 @@
 import SwiftUI
 import Photos
 
-/// 待删清单页：每个相似组一节，横排展示组内成员（Best Shot 星标、
-/// 不可选），仅 SafetyRules 放行的成员可勾选，多组累计后统一进系统确认框。
+/// 待删清单页：每个相似组一节，横排展示组内成员（Best Shot 星标），
+/// 建议删除项可快速勾选，用户也可手动选择组内任意成员后统一进系统确认框。
 struct DeletionReviewView: View {
     /// 候选组（已过 SafetyRules；preselectableIDs 即可勾选成员）。
-    let candidates: [ScoredGroup]
     let deletionService: PhotoLibraryServiceProtocol
     let database: PhotoLibraryDatabase
     /// 删除完成回调（刷新清单/组视图）。
@@ -23,9 +22,24 @@ struct DeletionReviewView: View {
     @State private var isDeleting = false
     @State private var statusText: String?
     @State private var viewerContext: ViewerContext?
+    /// 删除回调异步返回时，页面也要立即从本地列表移除已消失成员，
+    /// 避免继续显示已删除缩略图或把它们再次提交到系统确认框。
+    @State private var visibleCandidates: [ScoredGroup]
+
+    init(
+        candidates: [ScoredGroup],
+        deletionService: PhotoLibraryServiceProtocol,
+        database: PhotoLibraryDatabase,
+        onDeleted: @escaping ([String]) -> Void = { _ in }
+    ) {
+        self.deletionService = deletionService
+        self.database = database
+        self.onDeleted = onDeleted
+        _visibleCandidates = State(initialValue: candidates)
+    }
 
     private var displayableGroups: [ScoredGroup] {
-        candidates.filter { !$0.preselectableIDs.isEmpty }
+        visibleCandidates.filter { !$0.preselectableIDs.isEmpty }
     }
 
     private var totalPreselectableCount: Int {
@@ -126,22 +140,6 @@ struct DeletionReviewView: View {
             }
             .listStyle(.insetGrouped)
 
-            // 全选所有建议删除按钮
-            Button {
-                selectAllPreselectable()
-            } label: {
-                HStack {
-                    Image(systemName: "checkmark.circle.fill")
-                    Text("全选所有建议删除（\(totalPreselectableCount) 张）")
-                }
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 8)
-            }
-            .buttonStyle(.bordered)
-            .tint(.red)
-            .padding(.horizontal)
-            .padding(.top, 4)
-
             Button {
                 confirmDeletion()
             } label: {
@@ -224,20 +222,13 @@ struct DeletionReviewView: View {
         }
     }
 
-    /// 全选所有组的建议删除项
-    private func selectAllPreselectable() {
-        for group in displayableGroups {
-            selectedIDs.formUnion(group.preselectableIDs)
-        }
-    }
-
     private func shortGroupLabel(_ group: ScoredGroup) -> String {
         let suffix = group.groupID.suffix(8)
         return "组 #\(suffix)"
     }
 
     private func confirmDeletion() {
-        let ids = Array(selectedIDs)
+        let ids = selectedIDs.sorted()
         isDeleting = true
         statusText = "等待你在系统确认框中批准…"
         deletionService.requestDelete(of: ids) { success, error in
@@ -245,12 +236,51 @@ struct DeletionReviewView: View {
             if success {
                 database.markDeleted(assetIds: ids)
                 selectedIDs.removeAll()
+                removeDeletedFromVisible(Set(ids))
                 onDeleted(ids)
                 statusText = "已批准删除。照片将在系统\"最近删除\"保留约 30 天。"
             } else {
-                statusText = "未执行删除\(error.map { "：\($0.localizedDescription)" } ?? "。")可重试。"
+                // 删除服务按批次执行时可能出现部分成功；用 PhotoKit 当前快照
+                // 区分真正消失的项目，避免把已成功删除的项留在待删清单里。
+                let survivors = Set(deletionService.fetchAssets(matching: ids)
+                    .map(\.localIdentifier))
+                let deleted = Set(ids).subtracting(survivors)
+                if !deleted.isEmpty {
+                    let deletedIDs = Array(deleted)
+                    database.markDeleted(assetIds: deletedIDs)
+                    selectedIDs.subtract(deleted)
+                    removeDeletedFromVisible(deleted)
+                    onDeleted(deletedIDs)
+                    statusText = "已删除 \(deleted.count) 张；其余项目未执行，可重试。"
+                } else {
+                    statusText = "未执行删除\(error.map { "：\($0.localizedDescription)" } ?? "。")可重试。"
+                }
             }
         }
+    }
+
+    private func removeDeletedFromVisible(_ deleted: Set<String>) {
+        visibleCandidates = visibleCandidates.compactMap { group in
+            let remaining = group.members.filter { !deleted.contains($0.record.localIdentifier) }
+            guard remaining.count >= 2 else { return nil }
+            let rebuiltMembers = remaining.enumerated().map { index, member in
+                ScoredMember(
+                    record: member.record,
+                    score: member.score,
+                    isBestShot: index == 0
+                )
+            }
+            return ScoredGroup(
+                groupID: group.groupID,
+                reason: group.reason,
+                members: rebuiltMembers,
+                preselectableIDs: GroupScoring.preselectableIDs(for: rebuiltMembers)
+            )
+        }
+        let visibleIDs = Set(visibleCandidates.flatMap { group in
+            group.members.map { $0.record.localIdentifier }
+        })
+        selectedIDs.formIntersection(visibleIDs)
     }
 }
 
@@ -391,7 +421,13 @@ struct FullPhotoView: View {
                 contentMode: .aspectFit,
                 options: options
             ) { img, _ in delivered = img }
-            DispatchQueue.main.async { self.image = delivered }
+            DispatchQueue.main.async {
+                if let delivered {
+                    self.image = delivered
+                } else {
+                    self.failed = true
+                }
+            }
         }
     }
 }
@@ -449,7 +485,13 @@ struct AssetThumbnailView: View {
                 contentMode: .aspectFill,
                 options: options
             ) { img, _ in delivered = img }
-            DispatchQueue.main.async { self.image = delivered }
+            DispatchQueue.main.async {
+                if let delivered {
+                    self.image = delivered
+                } else {
+                    self.failed = true
+                }
+            }
         }
     }
 }

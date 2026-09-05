@@ -1,10 +1,10 @@
 // MARK: - PhotoLibraryDatabase
-// 职责：GRDB 持久化层。五张表的建库迁移（DDL 以 docs/tech-spec.md §4 为唯一权威）、
+// 职责：GRDB 持久化层。核心表的建库迁移（DDL 以 docs/tech-spec.md §4 为唯一权威）、
 //       资产快照 upsert、特征读写、裁决与截图分类的落表入口。
 // 任务卡：T03。
 //
 // 铁律：本地库只存分析结果与 PhotoKit identifier，任何情况下不复制原图字节；
-//       迁移带版本号向前兼容（GRDB DatabaseMigrator），绝不 drop 重建。
+//       迁移带版本号向前兼容（GRDB DatabaseMigrator）；仅 v3 为主键变更做受控表迁移。
 
 import Foundation
 import GRDB
@@ -71,6 +71,58 @@ final class PhotoLibraryDatabase {
         // 只加列不重建（铁律：向前兼容迁移）。
         (name: "v2.screenshotOcrText", statements: [
             "ALTER TABLE screenshot_classifications ADD COLUMN ocr_text TEXT NOT NULL DEFAULT ''",
+        ]),
+        // v3：featureprints 原先以 asset_id 为主键，哈希、embedding、评分会互相覆盖。
+        // 重建为 (asset_id, feature_kind) 复合主键，保留旧行并按信封首字节推断类型。
+        (name: "v3.featureprintKinds", statements: [
+            """
+            CREATE TABLE featureprints_v3 (
+              asset_id        TEXT NOT NULL REFERENCES assets(local_identifier) ON DELETE CASCADE,
+              feature_kind    TEXT NOT NULL CHECK (feature_kind IN ('hash','embedding','scores','legacy')),
+              feature_version INTEGER NOT NULL,
+              data            BLOB    NOT NULL,
+              computed_at     REAL NOT NULL,
+              PRIMARY KEY (asset_id, feature_kind)
+            )
+            """,
+            """
+            INSERT INTO featureprints_v3 (asset_id, feature_kind, feature_version, data, computed_at)
+            SELECT asset_id,
+                   CASE hex(substr(data, 1, 1))
+                     WHEN '01' THEN 'hash'
+                     WHEN '02' THEN 'embedding'
+                     WHEN '03' THEN 'scores'
+                     ELSE 'legacy'
+                   END,
+                   feature_version, data, computed_at
+            FROM featureprints
+            """,
+            "DROP TABLE featureprints",
+            "ALTER TABLE featureprints_v3 RENAME TO featureprints",
+            "CREATE INDEX IF NOT EXISTS idx_featureprints_version_kind ON featureprints(feature_version, feature_kind)",
+        ]),
+        // v4：删除审计状态与动作事件独立落表。动作不能覆盖删除/保留裁决，
+        // 且同一资产可重复执行多个动作。
+        (name: "v4.deletionAndActionAudit", statements: [
+            "ALTER TABLE decisions ADD COLUMN deleted_at REAL",
+            """
+            CREATE TABLE IF NOT EXISTS action_events (
+              id          INTEGER PRIMARY KEY AUTOINCREMENT,
+              asset_id    TEXT NOT NULL REFERENCES assets(local_identifier) ON DELETE CASCADE,
+              action      TEXT NOT NULL,
+              happened_at REAL NOT NULL
+            )
+            """,
+            // 兼容 v1/v2 曾把动作写进 decisions.reason 的数据，迁移为独立事件；
+            // 原裁决行保留，避免丢失用户当时的处理状态。
+            """
+            INSERT INTO action_events (asset_id, action, happened_at)
+            SELECT asset_id, substr(reason, 8), decided_at
+            FROM decisions
+            WHERE reason LIKE 'action:%' AND length(trim(substr(reason, 8))) > 0
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_decisions_verdict_deleted ON decisions(verdict, deleted_at)",
+            "CREATE INDEX IF NOT EXISTS idx_action_events_happened ON action_events(happened_at)",
         ]),
     ]
 
@@ -143,46 +195,71 @@ final class PhotoLibraryDatabase {
     func upsert(
         asset record: AssetRecord,
         fetchedAt: Date,
-        locallyAvailable: Bool = true,
+        locallyAvailable: Bool? = nil,
         estimatedBytes: Int64? = nil
     ) {
+        guard !record.localIdentifier.isEmpty else { return }
+        let availability = locallyAvailable ?? record.locallyAvailable
         try? writer.write { db in
-            try db.execute(
-                sql: """
-                INSERT INTO assets (
-                  local_identifier, favorite, is_edited, media_type,
-                  pixel_width, pixel_height, duration_seconds, creation_date,
-                  is_screenshot, burst_id, estimated_bytes, locally_available, fetched_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(local_identifier) DO UPDATE SET
-                  favorite = excluded.favorite,
-                  is_edited = excluded.is_edited,
-                  media_type = excluded.media_type,
-                  pixel_width = excluded.pixel_width,
-                  pixel_height = excluded.pixel_height,
-                  duration_seconds = excluded.duration_seconds,
-                  creation_date = excluded.creation_date,
-                  is_screenshot = excluded.is_screenshot,
-                  estimated_bytes = excluded.estimated_bytes,
-                  locally_available = excluded.locally_available,
-                  fetched_at = excluded.fetched_at
-                """,
-                arguments: [
-                    record.localIdentifier,
-                    record.favorite,
-                    record.isEdited,
-                    Self.storageName(of: record.mediaType),
-                    record.pixelWidth,
-                    record.pixelHeight,
-                    record.mediaType == .video ? record.duration : nil,
-                    record.creationDate?.timeIntervalSince1970,
-                    record.isScreenshot,
-                    nil as String?,
-                    estimatedBytes,
-                    locallyAvailable,
-                    fetchedAt.timeIntervalSince1970,
-                ]
+            try Self.writeAsset(
+                db: db,
+                record: record,
+                fetchedAt: fetchedAt,
+                locallyAvailable: availability,
+                estimatedBytes: estimatedBytes
             )
+        }
+    }
+
+    /// 批量写入资产快照；整个 fetching 轮次共用一个事务，避免 5 万张相册产生
+    /// 5 万次独立提交。单资产 upsert 仍保留给 PhotoKit 增量事件和测试调用。
+    func upsert(assets records: [AssetRecord], fetchedAt: Date) {
+        let inputs = records.compactMap { record -> (AssetRecord, Bool, Int64?)? in
+            guard !record.localIdentifier.isEmpty else { return nil }
+            return (record, record.locallyAvailable, MediaSizeEstimator.estimatedBytes(for: record))
+        }
+        guard !inputs.isEmpty else { return }
+        try? writer.write { db in
+            for (record, locallyAvailable, estimatedBytes) in inputs {
+                try Self.writeAsset(
+                    db: db,
+                    record: record,
+                    fetchedAt: fetchedAt,
+                    locallyAvailable: locallyAvailable,
+                    estimatedBytes: estimatedBytes
+                )
+            }
+        }
+    }
+
+    /// 用一次完整的 PhotoKit 快照校准本地索引：写入当前资产并移除相册中
+    /// 已不存在的旧行。整个替换在同一事务内完成，进程中断时不会留下半套快照。
+    /// 增量变更不能调用此方法（应使用 upsert + removeAssetsFromLibrary）。
+    func replaceAssetSnapshot(_ records: [AssetRecord], fetchedAt: Date) {
+        let inputs = records.compactMap { record -> (AssetRecord, Bool, Int64?)? in
+            guard !record.localIdentifier.isEmpty else { return nil }
+            return (record, record.locallyAvailable, MediaSizeEstimator.estimatedBytes(for: record))
+        }
+        let incomingIDs = Set(inputs.map { $0.0.localIdentifier })
+        try? writer.write { db in
+            for (record, locallyAvailable, estimatedBytes) in inputs {
+                try Self.writeAsset(
+                    db: db,
+                    record: record,
+                    fetchedAt: fetchedAt,
+                    locallyAvailable: locallyAvailable,
+                    estimatedBytes: estimatedBytes
+                )
+            }
+
+            // 不使用 IN (...)，避免 5 万张相册触碰 SQLite 默认绑定参数上限。
+            let existingIDs = try String.fetchAll(db, sql: "SELECT local_identifier FROM assets")
+            for staleID in existingIDs where !incomingIDs.contains(staleID) {
+                try db.execute(
+                    sql: "DELETE FROM assets WHERE local_identifier = ?",
+                    arguments: [staleID]
+                )
+            }
         }
     }
 
@@ -195,27 +272,35 @@ final class PhotoLibraryDatabase {
     // MARK: featureprints 表
 
     func upsertFeatureprint(assetId: String, data: Data, featureVersion: Int, computedAt: Date) {
+        guard !assetId.isEmpty, !data.isEmpty else { return }
+        let kind = Self.featureKind(for: data)
         try? writer.write { db in
             try db.execute(
                 sql: """
-                INSERT INTO featureprints (asset_id, feature_version, data, computed_at)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT(asset_id) DO UPDATE SET
+                INSERT INTO featureprints (asset_id, feature_kind, feature_version, data, computed_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(asset_id, feature_kind) DO UPDATE SET
                   feature_version = excluded.feature_version,
                   data = excluded.data,
                   computed_at = excluded.computed_at
                 """,
-                arguments: [assetId, featureVersion, data, computedAt.timeIntervalSince1970]
+                arguments: [assetId, kind, featureVersion, data, computedAt.timeIntervalSince1970]
             )
         }
     }
 
-    /// 读回特征；featureVersion 不匹配时返回 nil（调用方视为需重算）。
+    /// 读回某资产的特征；同一资产可能同时有哈希、向量和评分，
+    /// 这里保留兼容接口，调用方需要具体类型时使用下面三个批量读取方法。
     func featureprint(assetId: String, featureVersion: Int) -> Data? {
         try? writer.read { db in
             try Data.fetchOne(
                 db,
-                sql: "SELECT data FROM featureprints WHERE asset_id = ? AND feature_version = ?",
+                sql: """
+                SELECT data FROM featureprints
+                WHERE asset_id = ? AND feature_version = ?
+                ORDER BY feature_kind
+                LIMIT 1
+                """,
                 arguments: [assetId, featureVersion]
             )
         }
@@ -228,7 +313,7 @@ final class PhotoLibraryDatabase {
         try? writer.read { db in
             let rows = try Row.fetchAll(
                 db,
-                sql: "SELECT asset_id, data FROM featureprints WHERE feature_version = ?",
+                sql: "SELECT asset_id, data FROM featureprints WHERE feature_version = ? AND feature_kind = 'hash'",
                 arguments: [featureVersion]
             )
             for row in rows {
@@ -247,13 +332,14 @@ final class PhotoLibraryDatabase {
         try? writer.read { db in
             let rows = try Row.fetchAll(
                 db,
-                sql: "SELECT asset_id, data FROM featureprints WHERE feature_version = ?",
+                sql: "SELECT asset_id, data FROM featureprints WHERE feature_version = ? AND feature_kind = 'embedding'",
                 arguments: [featureVersion]
             )
             for row in rows {
                 if let data = row["data"] as? Data,
-                   let vector = FeaturePrintCodec.decodeEmbedding(data) {
-                    result[row["asset_id"] as String] = vector
+                   let vector = FeaturePrintCodec.decodeEmbedding(data),
+                   EmbeddingMath.isUsable(vector) {
+                    result[row["asset_id"] as String] = EmbeddingMath.normalized(vector)
                 }
             }
         }
@@ -266,7 +352,7 @@ final class PhotoLibraryDatabase {
         try? writer.read { db in
             let rows = try Row.fetchAll(
                 db,
-                sql: "SELECT asset_id, data FROM featureprints WHERE feature_version = ?",
+                sql: "SELECT asset_id, data FROM featureprints WHERE feature_version = ? AND feature_kind = 'scores'",
                 arguments: [featureVersion]
             )
             for row in rows {
@@ -279,22 +365,44 @@ final class PhotoLibraryDatabase {
         return result
     }
 
-    /// 删除完成后批量落 verdicts（T10：verdict='delete'，reason 记录来源）。
-    /// 资产行若已随删除清理（外键级联）则对应 decisions 行也级联消失——
-    /// 本方法对仍存在的资产行写入裁决，供审计与"删除后立即重扫不产生幽灵条目"。
+    /// 删除完成后批量落审计状态。deleted_at 使"待确认"和"已获系统批准"分开，
+    /// 同时保留行供诊断；如果资产稍后从系统相册消失，外键级联仍可清理它。
     func markDeleted(assetIds: [String], at date: Date = Date()) {
-        for assetId in assetIds {
-            try? writer.write { db in
+        guard !assetIds.isEmpty else { return }
+        try? writer.write { db in
+            for assetId in Set(assetIds) {
+                // PhotoKit 可能在确认框前已把某个 id 从库中移除；跳过不存在的
+                // 父行，避免一个过期 id 让整个批次因外键约束回滚。
+                guard (try Int.fetchOne(
+                    db,
+                    sql: "SELECT EXISTS(SELECT 1 FROM assets WHERE local_identifier = ?)",
+                    arguments: [assetId]
+                ) ?? 0) == 1 else { continue }
                 try db.execute(
                     sql: """
-                    INSERT INTO decisions (asset_id, verdict, reason, decided_at)
-                    VALUES (?, 'delete', 'user_approved_system_confirm', ?)
+                    INSERT INTO decisions (asset_id, verdict, reason, decided_at, deleted_at)
+                    VALUES (?, 'delete', 'user_approved_system_confirm', ?, ?)
                     ON CONFLICT(asset_id) DO UPDATE SET
                       verdict = excluded.verdict,
                       reason = excluded.reason,
-                      decided_at = excluded.decided_at
+                      decided_at = excluded.decided_at,
+                      deleted_at = excluded.deleted_at
                     """,
-                    arguments: [assetId, date.timeIntervalSince1970]
+                    arguments: [assetId, date.timeIntervalSince1970, date.timeIntervalSince1970]
+                )
+            }
+        }
+    }
+
+    /// 相册外部删除后移除本地索引；外键级联清理特征、裁决和动作审计。
+    /// 这与 markDeleted 分开，避免把用户在系统确认框外的删除伪装成已批准操作。
+    func removeAssetsFromLibrary(assetIds: [String]) {
+        guard !assetIds.isEmpty else { return }
+        try? writer.write { db in
+            for assetId in Set(assetIds) {
+                try db.execute(
+                    sql: "DELETE FROM assets WHERE local_identifier = ?",
+                    arguments: [assetId]
                 )
             }
         }
@@ -302,38 +410,89 @@ final class PhotoLibraryDatabase {
 
     // MARK: Daily Inbox 计数（T14）
 
-    /// 当日新增：拍摄时间 ≥ 窗口起点（epoch 秒）的资产数。
-    func countAssets(createdAtOrAfter windowStart: Date) -> Int {
+    /// 当日新增：拍摄时间位于 [windowStart, windowEnd) 的资产数。
+    /// 未传结束时间时保留旧的"起点以后"兼容语义。
+    func countAssets(createdAtOrAfter windowStart: Date, before windowEnd: Date? = nil) -> Int {
         (try? writer.read { db in
-            try Int.fetchOne(
+            if let windowEnd {
+                return try Int.fetchOne(
+                    db,
+                    sql: """
+                    SELECT COUNT(*) FROM assets a
+                    WHERE a.creation_date >= ? AND a.creation_date < ?
+                      AND NOT EXISTS (
+                        SELECT 1 FROM decisions d
+                        WHERE d.asset_id = a.local_identifier AND d.deleted_at IS NOT NULL
+                      )
+                    """,
+                    arguments: [windowStart.timeIntervalSince1970, windowEnd.timeIntervalSince1970]
+                )
+            }
+            return try Int.fetchOne(
                 db,
-                sql: "SELECT COUNT(*) FROM assets WHERE creation_date >= ?",
+                sql: """
+                SELECT COUNT(*) FROM assets a
+                WHERE a.creation_date >= ?
+                  AND NOT EXISTS (
+                    SELECT 1 FROM decisions d
+                    WHERE d.asset_id = a.local_identifier AND d.deleted_at IS NOT NULL
+                  )
+                """,
                 arguments: [windowStart.timeIntervalSince1970]
             )
         }) ?? 0
     }
 
-    /// 当日任务动作数：decisions 里 reason 以 "action:" 开头且时间在窗口内。
-    func countActions(atOrAfter windowStart: Date) -> Int {
+    /// 当日任务动作数：独立事件表支持同一资产重复执行动作。
+    func countActions(atOrAfter windowStart: Date, before windowEnd: Date? = nil) -> Int {
         (try? writer.read { db in
-            try Int.fetchOne(
+            if let windowEnd {
+                return try Int.fetchOne(
+                    db,
+                    sql: "SELECT COUNT(*) FROM action_events WHERE happened_at >= ? AND happened_at < ?",
+                    arguments: [windowStart.timeIntervalSince1970, windowEnd.timeIntervalSince1970]
+                )
+            }
+            return try Int.fetchOne(
                 db,
-                sql: "SELECT COUNT(*) FROM decisions WHERE reason LIKE 'action:%' AND decided_at >= ?",
+                sql: "SELECT COUNT(*) FROM action_events WHERE happened_at >= ?",
                 arguments: [windowStart.timeIntervalSince1970]
             )
         }) ?? 0
     }
 
-    /// 当前有效删除裁决数（verdict='delete' 的去重资产数）。
+    /// 当前有效删除裁决数（尚未获得系统确认的 delete）。
     func countDeleteVerdicts() -> Int {
         (try? writer.read { db in
-            try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM decisions WHERE verdict = 'delete'")
+            try Int.fetchOne(
+                db,
+                sql: "SELECT COUNT(*) FROM decisions WHERE verdict = 'delete' AND deleted_at IS NULL"
+            )
         }) ?? 0
     }
 
     /// 任务动作落库（T12 动作执行后调用，供 Daily Inbox 统计）。
     func markActionTaken(assetId: String, action: String, at date: Date = Date()) {
-        setDecision(assetId: assetId, verdict: .todo, reason: "action:\(action)", decidedAt: date)
+        let normalizedAction = action.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !assetId.isEmpty, !normalizedAction.isEmpty else { return }
+        try? writer.write { db in
+            try db.execute(
+                sql: "INSERT INTO action_events (asset_id, action, happened_at) VALUES (?, ?, ?)",
+                arguments: [assetId, normalizedAction, date.timeIntervalSince1970]
+            )
+        }
+    }
+
+    /// 返回已有指定裁决的资产 id，用于自动候选生成时尊重用户的 keep。
+    func assetIDs(withVerdict verdict: Verdict) -> Set<String> {
+        let ids = (try? writer.read { db in
+            try String.fetchAll(
+                db,
+                sql: "SELECT asset_id FROM decisions WHERE verdict = ? AND deleted_at IS NULL",
+                arguments: [verdict.rawValue]
+            )
+        }) ?? []
+        return Set(ids)
     }
 
     /// 丢弃非当前版本的特征行（ScanStateMachine.FEATURE_VERSION 变更后的脏数据清理）。
@@ -355,6 +514,7 @@ final class PhotoLibraryDatabase {
     // MARK: decisions 表
 
     func setDecision(assetId: String, verdict: Verdict, reason: String, decidedAt: Date) {
+        guard !assetId.isEmpty else { return }
         try? writer.write { db in
             try db.execute(
                 sql: """
@@ -363,7 +523,8 @@ final class PhotoLibraryDatabase {
                 ON CONFLICT(asset_id) DO UPDATE SET
                   verdict = excluded.verdict,
                   reason = excluded.reason,
-                  decided_at = excluded.decided_at
+                  decided_at = excluded.decided_at,
+                  deleted_at = NULL
                 """,
                 arguments: [assetId, verdict.rawValue, reason, decidedAt.timeIntervalSince1970]
             )
@@ -388,6 +549,66 @@ final class PhotoLibraryDatabase {
 
     // MARK: 辅助
 
+    private static func writeAsset(
+        db: Database,
+        record: AssetRecord,
+        fetchedAt: Date,
+        locallyAvailable: Bool,
+        estimatedBytes: Int64?
+    ) throws {
+        let width = max(0, record.pixelWidth)
+        let height = max(0, record.pixelHeight)
+        let duration: Double?
+        if record.mediaType == .video, record.duration.isFinite, record.duration >= 0 {
+            duration = record.duration
+        } else {
+            duration = nil
+        }
+        let creationTimestamp = record.creationDate?.timeIntervalSince1970
+        let safeCreationTimestamp = creationTimestamp.flatMap { $0.isFinite ? $0 : nil }
+        let safeEstimatedBytes = estimatedBytes.flatMap { $0 >= 0 ? $0 : nil }
+        let safeFetchedTimestamp = fetchedAt.timeIntervalSince1970.isFinite
+            ? fetchedAt.timeIntervalSince1970
+            : 0
+
+        try db.execute(
+            sql: """
+            INSERT INTO assets (
+              local_identifier, favorite, is_edited, media_type,
+              pixel_width, pixel_height, duration_seconds, creation_date,
+              is_screenshot, burst_id, estimated_bytes, locally_available, fetched_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(local_identifier) DO UPDATE SET
+              favorite = excluded.favorite,
+              is_edited = excluded.is_edited,
+              media_type = excluded.media_type,
+              pixel_width = excluded.pixel_width,
+              pixel_height = excluded.pixel_height,
+              duration_seconds = excluded.duration_seconds,
+              creation_date = excluded.creation_date,
+              is_screenshot = excluded.is_screenshot,
+              estimated_bytes = excluded.estimated_bytes,
+              locally_available = excluded.locally_available,
+              fetched_at = excluded.fetched_at
+            """,
+            arguments: [
+                record.localIdentifier,
+                record.favorite,
+                record.isEdited,
+                Self.storageName(of: record.mediaType),
+                width,
+                height,
+                duration,
+                safeCreationTimestamp,
+                record.isScreenshot,
+                nil as String?,
+                safeEstimatedBytes,
+                locallyAvailable,
+                safeFetchedTimestamp,
+            ]
+        )
+    }
+
     /// 原始单行读取（内部可见，供测试逐字段断言与诊断）。
     func row(forSQL sql: String, arguments: [Any] = []) -> Row? {
         try? writer.read { db in
@@ -411,6 +632,17 @@ final class PhotoLibraryDatabase {
         case .video: return "video"
         case .audio: return "audio"
         case .unknown: return "unknown"
+        }
+    }
+
+    /// 由 FeaturePrintCodec 的首字节确定物理分区；未知旧数据保留为 legacy，
+    /// 不会和三类新特征互相覆盖。
+    private static func featureKind(for data: Data) -> String {
+        switch data.first {
+        case 1: return "hash"
+        case 2: return "embedding"
+        case 3: return "scores"
+        default: return "legacy"
         }
     }
 }

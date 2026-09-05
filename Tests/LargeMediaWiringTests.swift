@@ -93,15 +93,16 @@ final class LargeMediaWiringTests: XCTestCase {
 
         let snapshot = engine.largeMediaCandidates
         let ids = snapshot.map { $0.record.localIdentifier }
-        XCTAssertEqual(Set(ids), Set(["vid-4k", "override-vid", "icloud-vid"]),
+        XCTAssertEqual(Set(ids), Set(["vid-4k", "icloud-vid"]),
                        "实际：\(ids)")
 
         // 降序断言。
         XCTAssertEqual(ids.first, "vid-4k")
-        XCTAssertEqual(ids, ["vid-4k", "override-vid", "icloud-vid"])
+        XCTAssertEqual(ids, ["vid-4k", "icloud-vid"])
 
         // 裁决：非 keep 候选落 large_media；用户保留不被改写；小图零裁决。
         XCTAssertEqual(database.decision(assetId: "vid-4k")?.reason, "large_media")
+        XCTAssertNil(database.decision(assetId: "icloud-vid"), "未下载项目不可操作，不应进入待确认裁决")
         let overridden = database.decision(assetId: "override-vid")
         XCTAssertEqual(overridden?.verdict, .keep)
         XCTAssertEqual(overridden?.reason, "user_override")

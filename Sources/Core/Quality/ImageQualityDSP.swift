@@ -12,7 +12,8 @@ enum ImageQualityDSP {
     /// 清晰度得分：内部像素做四邻域拉普拉斯响应，方差经 AppConfig 尺度归一化到 0~1。
     /// 定义行为：宽或高 < 3（无内部像素）返回 0 分；缓冲与维度不符返回 nil。
     static func clarityScore(grayPixels: [UInt8], width: Int, height: Int) -> Double? {
-        guard width > 0, height > 0, grayPixels.count == width * height else { return nil }
+        guard width > 0, height > 0, width <= Int.max / height,
+              grayPixels.count == width * height else { return nil }
         guard width >= 3, height >= 3 else { return 0 }
 
         var responses = [Double]()
@@ -39,7 +40,8 @@ enum ImageQualityDSP {
     /// 曝光质量分：1 −（过曝像素占比 + 欠曝像素占比），钳制 0~1。
     /// 全黑/全白图触底为 0；均匀中间调为 1。维度不符返回 nil。
     static func exposureScore(grayPixels: [UInt8], width: Int, height: Int) -> Double? {
-        guard width > 0, height > 0, grayPixels.count == width * height else { return nil }
+        guard width > 0, height > 0, width <= Int.max / height,
+              grayPixels.count == width * height else { return nil }
         guard !grayPixels.isEmpty else { return nil }
 
         var overExposed = 0
@@ -58,7 +60,8 @@ enum ImageQualityDSP {
     /// 过曝像素占比（亮度 ≥ 阈值）。维度不符返回 nil。
     /// T16 低质量检测"过曝"分区的判定输入。
     static func overExposedRatio(grayPixels: [UInt8], width: Int, height: Int) -> Double? {
-        guard width > 0, height > 0, grayPixels.count == width * height else { return nil }
+        guard width > 0, height > 0, width <= Int.max / height,
+              grayPixels.count == width * height else { return nil }
         guard !grayPixels.isEmpty else { return nil }
         let over = grayPixels.lazy.filter { $0 >= AppConfig.dspOverExposedLumaThreshold }.count
         return Double(over) / Double(grayPixels.count)
@@ -66,7 +69,8 @@ enum ImageQualityDSP {
 
     /// 欠曝像素占比（亮度 ≤ 阈值）。维度不符返回 nil。
     static func underExposedRatio(grayPixels: [UInt8], width: Int, height: Int) -> Double? {
-        guard width > 0, height > 0, grayPixels.count == width * height else { return nil }
+        guard width > 0, height > 0, width <= Int.max / height,
+              grayPixels.count == width * height else { return nil }
         guard !grayPixels.isEmpty else { return nil }
         let under = grayPixels.lazy.filter { $0 <= AppConfig.dspUnderExposedLumaThreshold }.count
         return Double(under) / Double(grayPixels.count)

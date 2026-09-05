@@ -57,6 +57,7 @@ enum KeepScore {
             value += effectiveWeights.favoriteBoost
         }
         // 钳制到 [0, 1]：冗余惩罚可能把分数打成负数，不能让负分污染排序语义。
+        guard value.isFinite else { return 0.5 }
         return min(max(value, 0), 1)
     }
 }

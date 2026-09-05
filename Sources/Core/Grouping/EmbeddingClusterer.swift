@@ -7,21 +7,33 @@ import Foundation
 
 enum EmbeddingMath {
 
+    /// 只有有限、非零且维度非空的向量才可参与聚类。
+    /// Vision/磁盘损坏产生的 NaN、无穷或零向量没有相似度语义，必须当作缺失特征。
+    static func isUsable(_ vector: [Double]) -> Bool {
+        guard !vector.isEmpty, vector.allSatisfy({ $0.isFinite }) else { return false }
+        let normSquared = vector.reduce(0.0) { $0 + $1 * $1 }
+        return normSquared.isFinite && normSquared > 0
+    }
+
     /// L2 归一化到单位长度。零向量（无方向）原样返回。
     static func normalized(_ vector: [Double]) -> [Double] {
-        let norm = (vector.reduce(0) { $0 + $1 * $1 }).squareRoot()
-        guard norm > 0 else { return vector }
+        guard !vector.isEmpty, vector.allSatisfy({ $0.isFinite }) else { return [] }
+        let normSquared = vector.reduce(0.0) { $0 + $1 * $1 }
+        guard normSquared.isFinite else { return [] }
+        let norm = normSquared.squareRoot()
+        guard norm > 0, norm.isFinite else { return vector }
         return vector.map { $0 / norm }
     }
 
     /// 欧氏距离；维度不等视为不可比。
     static func euclidean(_ a: [Double], _ b: [Double]) -> Double? {
-        guard a.count == b.count, !a.isEmpty else { return nil }
+        guard a.count == b.count, isUsable(a), isUsable(b) else { return nil }
         var sum = 0.0
         for index in a.indices {
             let delta = a[index] - b[index]
             sum += delta * delta
         }
+        guard sum.isFinite else { return nil }
         return sum.squareRoot()
     }
 }
@@ -39,6 +51,9 @@ enum EmbeddingClusterer {
         threshold: Double = AppConfig.embeddingClusterDistanceThreshold
     ) -> [[String]] {
         guard !members.isEmpty else { return [] }
+        guard threshold.isFinite, threshold >= 0 else {
+            return members.map { [$0.id] }
+        }
 
         var parent = Array(0..<members.count)
         func find(_ index: Int) -> Int {

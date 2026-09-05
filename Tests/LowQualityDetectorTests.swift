@@ -41,6 +41,11 @@ final class LowQualityDetectorTests: XCTestCase {
         XCTAssertEqual(LowQualityDetector.detect(clarity: 0.05, overRatio: 0, underRatio: 0.55), .underexposed)
     }
 
+    func testMalformedFloatInputsDoNotCreateExposureCandidates() {
+        XCTAssertNil(LowQualityDetector.detect(clarity: .nan, overRatio: .infinity, underRatio: .nan))
+        XCTAssertEqual(LowQualityDetector.detect(clarity: 0.05, overRatio: .nan, underRatio: .infinity), .blurry)
+    }
+
     func testPreselectableRedLines() {
         func candidate(favorite: Bool = false, edited: Bool = false, exempt: Bool = false) -> LowQualityCandidate {
             LowQualityCandidate(
@@ -225,8 +230,8 @@ final class LowQualityDetectorTests: XCTestCase {
 
         runAndWait(engine, workQueue: queue)
 
-        // 用户亲手保留的资产：仍在展示镜像里（可再手动处理），但裁决不被改写。
-        XCTAssertEqual(engine.lowQualityCandidates.count, 2)
+        // 用户亲手保留的资产不会在重扫时重新回到自动候选镜像。
+        XCTAssertEqual(engine.lowQualityCandidates.count, 1)
         let overridden = database.decision(assetId: "override-me")
         XCTAssertEqual(overridden?.verdict, .keep, "user_override 不得被自动裁决覆盖")
         XCTAssertEqual(overridden?.reason, "user_override")

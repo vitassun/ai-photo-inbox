@@ -22,7 +22,16 @@ enum TimeBucketizer {
     ) -> [[String]] {
         guard !entries.isEmpty else { return [] }
 
-        let sorted = entries.sorted { $0.date < $1.date }
+        // 同一时间戳用 id 打破平局；Swift sort 不保证等值元素稳定，
+        // 不加 tie-break 会让候选组顺序随输入顺序漂移。
+        let sorted = entries.sorted {
+            if $0.date != $1.date { return $0.date < $1.date }
+            return $0.id < $1.id
+        }
+        guard gapThreshold.isFinite, gapThreshold >= 0 else {
+            // 无效阈值不能把整库错误合并进一个桶；保守地逐项隔离。
+            return sorted.map { [$0.id] }
+        }
         var buckets: [[String]] = []
         var currentBucket: [String] = [sorted[0].id]
         var previousDate = sorted[0].date

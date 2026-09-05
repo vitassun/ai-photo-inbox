@@ -6,7 +6,8 @@
 import SwiftUI
 
 struct LargeMediaView: View {
-    let environment: AppEnvironment
+    @ObservedObject var environment: AppEnvironment
+    @Environment(\.scenePhase) private var scenePhase
     var onDeleted: ([String]) -> Void = { _ in }
 
     @State private var candidates: [LargeMediaCandidate] = []
@@ -27,13 +28,20 @@ struct LargeMediaView: View {
 
     /// 勾选集的可释放估算（仅本机资产可勾选）。
     private var selectedBytes: Int64 {
-        localCandidates
-            .filter { selectedIDs.contains($0.record.localIdentifier) }
-            .reduce(0) { $0 + $1.estimatedBytes }
+        sumEstimatedBytes(localCandidates.filter {
+            selectedIDs.contains($0.record.localIdentifier)
+        })
     }
 
     private var totalLocalBytes: Int64 {
-        localCandidates.reduce(0) { $0 + $1.estimatedBytes }
+        sumEstimatedBytes(localCandidates)
+    }
+
+    private func sumEstimatedBytes(_ values: [LargeMediaCandidate]) -> Int64 {
+        values.reduce(into: Int64(0)) { total, candidate in
+            let (sum, overflow) = total.addingReportingOverflow(candidate.estimatedBytes)
+            total = overflow ? Int64.max : sum
+        }
     }
 
     var body: some View {
@@ -61,6 +69,9 @@ struct LargeMediaView: View {
         .toolbarColorScheme(.dark, for: .navigationBar)
         .background(Theme.backgroundGradient.ignoresSafeArea())
         .onAppear(perform: reload)
+        .onChange(of: scenePhase) { phase in
+            if phase == .active { reload() }
+        }
         .fullScreenCover(item: Binding(
             get: { viewerAssetID.map { SingleAssetViewerContext(id: $0) } },
             set: { viewerAssetID = $0?.id }
@@ -165,8 +176,11 @@ struct LargeMediaView: View {
         let record = candidate.record
         switch record.mediaType {
         case .video:
-            let minutes = Int(record.duration / 60)
-            return record.duration >= 60 ? "视频 · \(minutes) 分钟" : "视频 · \(Int(record.duration)) 秒"
+            let duration = record.duration.isFinite
+                ? min(max(record.duration, 0), AppConfig.videoDurationCapSeconds)
+                : 0
+            let minutes = Int(duration / 60)
+            return duration >= 60 ? "视频 · \(minutes) 分钟" : "视频 · \(Int(duration)) 秒"
         default:
             return record.isLivePhoto ? "Live Photo" : "照片"
         }
@@ -192,7 +206,10 @@ struct LargeMediaView: View {
 
     private func reload() {
         candidates = environment.engine.largeMediaCandidates
-        selectedIDs.formUnion(localCandidates.map(\.record.localIdentifier))
+        // 进入页面只展示候选，不替用户做删除选择；刷新时也清掉已离开列表的旧勾选。
+        let validIDs = Set(candidates.filter { $0.record.locallyAvailable }
+            .map(\.record.localIdentifier))
+        selectedIDs.formIntersection(validIDs)
     }
 
     private func toggleSelection(_ id: String) {
@@ -204,21 +221,44 @@ struct LargeMediaView: View {
     }
 
     private func confirmDeletion() {
-        let ids = Array(selectedIDs)
+        let ids = selectedIDs.sorted()
         isDeleting = true
         statusText = "等待你在系统确认框中批准…"
         environment.photoLibraryService.requestDelete(of: ids) { success, error in
             isDeleting = false
             if success {
                 environment.database.markDeleted(assetIds: ids)
-                environment.engine.purgeDeletedFromViews(assetIds: ids)
                 selectedIDs.removeAll()
-                onDeleted(ids)
                 statusText = "已批准删除。项目将在系统\"最近删除\"保留约 30 天。"
+                environment.engine.purgeDeletedFromViews(assetIds: ids) {
+                    DispatchQueue.main.async {
+                        onDeleted(ids)
+                        reload()
+                    }
+                }
             } else {
-                statusText = "未执行删除\(error.map { "：\($0.localizedDescription)" } ?? "。")可重试。"
+                // 分批删除可能前几批成功、后续批次被取消；重查幸存者，
+                // 只把确实消失的 id 记为已删除并从待选中移除。
+                let survivors = Set(environment.photoLibraryService
+                    .fetchAssets(matching: ids)
+                    .map(\.localIdentifier))
+                let deleted = Set(ids).subtracting(survivors)
+                if !deleted.isEmpty {
+                    let deletedIDs = Array(deleted)
+                    environment.database.markDeleted(assetIds: deletedIDs)
+                    selectedIDs.subtract(deleted)
+                    statusText = "已删除 \(deleted.count) 项；其余项目未执行，可重试。"
+                    environment.engine.purgeDeletedFromViews(assetIds: deletedIDs) {
+                        DispatchQueue.main.async {
+                            onDeleted(deletedIDs)
+                            reload()
+                        }
+                    }
+                } else {
+                    statusText = "未执行删除\(error.map { "：\($0.localizedDescription)" } ?? "。")可重试。"
+                    reload()
+                }
             }
-            reload()
         }
     }
 }

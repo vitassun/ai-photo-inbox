@@ -1,7 +1,8 @@
 // MARK: - FeaturePrintCodec
 // 职责：featureprints 表 data 列的编解码信封——首字节为类型标记，
-//       使哈希（hex 字符串）与 embedding（double 数组）共存一张表且可辨。
-// 任务卡：T05。表结构以 tech-spec §4 DDL 为权威，不加列、不加表。
+//       使哈希（hex 字符串）、embedding（double 数组）和评分可辨；
+//       数据库同时按 feature_kind 分区，信封标记兼容旧版本迁移。
+// 任务卡：T05。表结构以 tech-spec §4 DDL 为权威，物理分区由数据库迁移统一维护。
 
 import Foundation
 
@@ -24,7 +25,10 @@ enum FeaturePrintCodec {
 
     static func decodeHash(_ data: Data) -> String? {
         guard let kind = data.first, kind == Kind.hash.rawValue else { return nil }
-        return String(data: data.dropFirst(), encoding: .utf8)
+        guard let text = String(data: data.dropFirst(), encoding: .utf8),
+              !text.isEmpty,
+              text.allSatisfy({ $0.hexDigitValue != nil }) else { return nil }
+        return text.lowercased()
     }
 
     // MARK: embedding（"2" + little-endian double 序列）
@@ -75,6 +79,8 @@ enum FeaturePrintCodec {
                 vector.append(Double(bitPattern: UInt64(littleEndian: bits)))
             }
         }
-        return vector
+        // 损坏的持久化数据不能参与相似度计算；将 NaN/无穷值视为缓存失效，
+        // 由扫描阶段重新计算或回退中性值。
+        return vector.allSatisfy { $0.isFinite } ? vector : nil
     }
 }

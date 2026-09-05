@@ -36,6 +36,7 @@ enum VisionResultAggregator {
 
     private static func clamped(_ value: Double?) -> Double {
         guard let value else { return neutralScore }
+        guard value.isFinite else { return neutralScore }
         return min(1, max(0, value))
     }
 }

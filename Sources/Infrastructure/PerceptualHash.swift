@@ -20,7 +20,8 @@ enum PerceptualHash {
     /// - Parameters:
     ///   - grayPixels: 行优先灰度值（0=黑，255=白），count 必须等于 width*height。
     static func hash(grayPixels: [UInt8], width: Int, height: Int) -> String? {
-        guard width > 0, height > 0, grayPixels.count == width * height else { return nil }
+        guard width > 0, height > 0, width <= Int.max / height,
+              grayPixels.count == width * height else { return nil }
 
         let matrix = downsampleToGrid(grayPixels, width: width, height: height)
         let dct = dct2(matrix)
@@ -92,13 +93,15 @@ enum PerceptualHash {
         var grid = [[Double]]()
         grid.reserveCapacity(gridSize)
         for gy in 0..<gridSize {
-            let y0 = gy * height / gridSize
-            let y1 = max(y0 + 1, (gy + 1) * height / gridSize)
+            // 输入缩略图有时小于 32×32；把采样区间钳在图像边界内，
+            // 避免小图在后段网格访问越界。
+            let y0 = min(height - 1, gy * height / gridSize)
+            let y1 = min(height, max(y0 + 1, (gy + 1) * height / gridSize))
             var row: [Double] = []
             row.reserveCapacity(gridSize)
             for gx in 0..<gridSize {
-                let x0 = gx * width / gridSize
-                let x1 = max(x0 + 1, (gx + 1) * width / gridSize)
+                let x0 = min(width - 1, gx * width / gridSize)
+                let x1 = min(width, max(x0 + 1, (gx + 1) * width / gridSize))
                 var sum = 0
                 for y in y0..<y1 {
                     let base = y * width

@@ -7,7 +7,8 @@ import SwiftUI
 import Photos
 
 struct LowQualityView: View {
-    let environment: AppEnvironment
+    @ObservedObject var environment: AppEnvironment
+    @Environment(\.scenePhase) private var scenePhase
     /// 删除完成回调（首页刷新摘要）。
     var onDeleted: ([String]) -> Void = { _ in }
 
@@ -49,6 +50,9 @@ struct LowQualityView: View {
         .toolbarColorScheme(.dark, for: .navigationBar)
         .background(Theme.backgroundGradient.ignoresSafeArea())
         .onAppear(perform: reload)
+        .onChange(of: scenePhase) { phase in
+            if phase == .active { reload() }
+        }
         .fullScreenCover(item: Binding(
             get: { viewerAssetID.map { SingleAssetViewerContext(id: $0) } },
             set: { viewerAssetID = $0?.id }
@@ -202,7 +206,10 @@ struct LowQualityView: View {
     // MARK: 动作
 
     private func reload() {
-        candidates = environment.engine.lowQualityCandidates
+        let next = environment.engine.lowQualityCandidates
+        candidates = next
+        selectedIDs.formIntersection(Set(next.filter { !$0.isNightExempt }
+            .map(\.record.localIdentifier)))
     }
 
     private func toggleSelection(_ id: String) {
@@ -222,27 +229,49 @@ struct LowQualityView: View {
             reason: "user_override",
             decidedAt: Date()
         )
-        environment.engine.removeLowQualityCandidates(assetIds: [id])
         selectedIDs.remove(id)
-        reload()
+        environment.engine.removeLowQualityCandidates(assetIds: [id]) {
+            DispatchQueue.main.async { reload() }
+        }
     }
 
     private func confirmDeletion() {
-        let ids = Array(selectedIDs)
+        let ids = selectedIDs.sorted()
         isDeleting = true
         statusText = "等待你在系统确认框中批准…"
         environment.photoLibraryService.requestDelete(of: ids) { success, error in
             isDeleting = false
             if success {
                 environment.database.markDeleted(assetIds: ids)
-                environment.engine.removeLowQualityCandidates(assetIds: ids)
                 selectedIDs.removeAll()
-                onDeleted(ids)
                 statusText = "已批准删除。照片将在系统\"最近删除\"保留约 30 天。"
+                environment.engine.removeLowQualityCandidates(assetIds: ids) {
+                    DispatchQueue.main.async {
+                        onDeleted(ids)
+                        reload()
+                    }
+                }
             } else {
-                statusText = "未执行删除\(error.map { "：\($0.localizedDescription)" } ?? "。")可重试。"
+                let survivors = Set(environment.photoLibraryService
+                    .fetchAssets(matching: ids)
+                    .map(\.localIdentifier))
+                let deleted = Set(ids).subtracting(survivors)
+                if !deleted.isEmpty {
+                    let deletedIDs = Array(deleted)
+                    environment.database.markDeleted(assetIds: deletedIDs)
+                    selectedIDs.subtract(deleted)
+                    statusText = "已删除 \(deleted.count) 张；其余项目未执行，可重试。"
+                    environment.engine.removeLowQualityCandidates(assetIds: deletedIDs) {
+                        DispatchQueue.main.async {
+                            onDeleted(deletedIDs)
+                            reload()
+                        }
+                    }
+                } else {
+                    statusText = "未执行删除\(error.map { "：\($0.localizedDescription)" } ?? "。")可重试。"
+                    reload()
+                }
             }
-            reload()
         }
     }
 }

@@ -8,6 +8,17 @@ import XCTest
 
 final class CloudConsentTests: XCTestCase {
 
+    private final class RecordingLLM: LLMClientProtocol {
+        var calls = 0
+        var shouldFail = false
+
+        func explainBestShot(candidates: [CandidateDescription]) async throws -> BestShotExplanation {
+            calls += 1
+            if shouldFail { throw NSError(domain: "test", code: 1) }
+            return BestShotExplanation(keepIndex: 1, reason: "remote")
+        }
+    }
+
     // MARK: 门闩状态机
 
     func testDefaultsToOffOnFreshStore() {
@@ -66,5 +77,27 @@ final class CloudConsentTests: XCTestCase {
     }
 
     // MARK: 门闩端到端：关 → 零出网；开 → 放行
+
+    func testConsentGatesRemoteAndFallsBackOnFailure() async throws {
+        let database = try PhotoLibraryDatabase.inMemory()
+        let store = GRDBKeyValueStore(database: database)
+        let remote = RecordingLLM()
+        let client = ConsentGatedLLMClient(store: store, remote: remote)
+        let candidates = [CandidateDescription(desc: "a"), CandidateDescription(desc: "b")]
+
+        let offline = try await client.explainBestShot(candidates: candidates)
+        XCTAssertEqual(offline.keepIndex, 0)
+        XCTAssertEqual(remote.calls, 0, "未同意时不得调用远端")
+
+        CloudConsent.setEnabled(true, store: store)
+        let online = try await client.explainBestShot(candidates: candidates)
+        XCTAssertEqual(online.keepIndex, 1)
+        XCTAssertEqual(remote.calls, 1)
+
+        remote.shouldFail = true
+        let fallback = try await client.explainBestShot(candidates: candidates)
+        XCTAssertEqual(fallback.keepIndex, 0, "远端失败必须回退本地结果")
+        XCTAssertEqual(remote.calls, 2)
+    }
 
 }

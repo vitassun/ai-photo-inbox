@@ -22,6 +22,7 @@ final class PhotoKitImageDataProvider: ScanImageDataProvider {
     }
 
     func imageData(for localIdentifier: String, maxDimension: Int) -> Data? {
+        guard !localIdentifier.isEmpty, maxDimension > 0 else { return nil }
         guard let asset = PHAsset.fetchAssets(
             withLocalIdentifiers: [localIdentifier],
             options: nil
@@ -45,5 +46,28 @@ final class PhotoKitImageDataProvider: ScanImageDataProvider {
             return nil
         }
         return data
+    }
+
+    /// 读取资产原始编码数据，仅用于需要保留原始 EXIF 的判定（例如夜间长曝光豁免）。
+    /// 与缩略图路径分开，避免 JPEG 重编码把原始曝光时间等元数据抹掉。
+    func originalImageData(for localIdentifier: String) -> Data? {
+        guard !localIdentifier.isEmpty else { return nil }
+        guard let asset = PHAsset.fetchAssets(
+            withLocalIdentifiers: [localIdentifier],
+            options: nil
+        ).firstObject else { return nil }
+
+        let options = PHImageRequestOptions()
+        options.version = .original
+        // EXIF 白名单依赖原始编码数据；fastFormat 可能返回已重编码的代理图。
+        options.deliveryMode = .highQualityFormat
+        options.isNetworkAccessAllowed = false
+        options.isSynchronous = true
+
+        var originalData: Data?
+        imageManager.requestImageDataAndOrientation(for: asset, options: options) { data, _, _, _ in
+            originalData = data
+        }
+        return originalData
     }
 }

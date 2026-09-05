@@ -1,7 +1,7 @@
 // MARK: - LLMClientProtocol
 // 职责：后端 LLM 兜底能力的协议抽象（tech-spec §2.2/§6 契约冻结）。
-//       实现两套：RemoteLLMClient（走 backend）/ MockLLMClient（离线确定性），
-//       失败时由调用方自行回落（截图功能已移除，无需降级包装）。
+//       实现包括 RemoteLLMClient（走 backend）、MockLLMClient（离线确定性结果）
+//       与 ConsentGatedLLMClient（同意门闩 + 失败降级）。
 // 任务卡：T13。
 
 import Foundation

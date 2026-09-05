@@ -23,6 +23,9 @@ enum GeoClusterer {
         radiusMeters: Double = AppConfig.geoClusterRadiusMeters
     ) -> [[String]] {
         guard !points.isEmpty else { return [] }
+        guard radiusMeters.isFinite, radiusMeters >= 0 else {
+            return points.map { [$0.id] }
+        }
 
         var parent = Array(0..<points.count)
         func find(_ index: Int) -> Int {
@@ -61,6 +64,12 @@ enum GeoClusterer {
 
     /// 球面距离（Haversine，地球平均半径 6371km）。
     static func haversineMeters(_ a: GeoPoint, _ b: GeoPoint) -> Double {
+        guard a.latitude.isFinite, a.longitude.isFinite,
+              b.latitude.isFinite, b.longitude.isFinite,
+              (-90...90).contains(a.latitude), (-180...180).contains(a.longitude),
+              (-90...90).contains(b.latitude), (-180...180).contains(b.longitude) else {
+            return .greatestFiniteMagnitude
+        }
         let earthRadius = 6_371_000.0
         let dLat = (b.latitude - a.latitude) * Double.pi / 180
         let dLon = (b.longitude - a.longitude) * Double.pi / 180
@@ -68,6 +77,8 @@ enum GeoClusterer {
         let lat2 = b.latitude * Double.pi / 180
         let h = sin(dLat / 2) * sin(dLat / 2)
             + cos(lat1) * cos(lat2) * sin(dLon / 2) * sin(dLon / 2)
-        return 2 * earthRadius * atan2(sqrt(h), sqrt(1 - h))
+        // 浮点误差可能让 h 略超出 [0,1]；钳制避免 sqrt(1-h) 产生 NaN。
+        let clampedH = max(0, min(1, h))
+        return 2 * earthRadius * atan2(sqrt(clampedH), sqrt(1 - clampedH))
     }
 }
