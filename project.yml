@@ -41,16 +41,18 @@ targets:
       # XcodeGen 需要把 .xcassets 作为 source 节点识别，才能生成
       # Compile Asset Catalog 阶段和最终的 Assets.car。
       - path: Resources/Assets.xcassets
+    info:
+      path: Resources/Info.plist
+      properties:
+        CFBundleDisplayName: "AI Photo Inbox"
+        CFBundleIconName: AppIcon
+        UILaunchScreen: {}
+        NSPhotoLibraryUsageDescription: "需要访问你的相册来整理和筛选照片；删除操作永远经系统确认框由你亲自批准。"
+        NSCalendarsWriteOnlyAccessUsageDescription: "仅在你点按「加入日历」时写入新事件；App 不读取你的日历内容。"
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.aiphotoinbox.app
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
-        # 明确写入生成的 Info.plist，确保重签名工具仍能找到主图标资源。
-        INFOPLIST_KEY_CFBundleIconName: AppIcon
-        GENERATE_INFOPLIST_FILE: YES
-        INFOPLIST_KEY_UILaunchScreen_Generation: YES
-        INFOPLIST_KEY_NSPhotoLibraryUsageDescription: "需要访问你的相册来整理和筛选照片；删除操作永远经系统确认框由你亲自批准。"
-        INFOPLIST_KEY_NSCalendarsWriteOnlyAccessUsageDescription: "仅在你点按「加入日历」时写入新事件；App 不读取你的日历内容。"
     dependencies:
       - package: GRDB
 
