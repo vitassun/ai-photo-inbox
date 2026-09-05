@@ -39,7 +39,9 @@ targets:
     sources:
       - path: Sources
     resources:
-      - path: Resources
+      # 显式指向资产目录；如果只写 Resources 文件夹，XcodeGen 会把
+      # Assets.xcassets 当作普通资源目录，最终 .app 不会生成 Assets.car。
+      - path: Resources/Assets.xcassets
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.aiphotoinbox.app
