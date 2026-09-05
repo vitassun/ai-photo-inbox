@@ -117,10 +117,23 @@ jobs:
       - name: Verify compiled app icon metadata
         run: |
           APP="build/Build/Products/Release-iphoneos/AIPhotoInbox.app"
-          test -d "$APP"
-          test -s "$APP/Assets.car"
-          ICON_NAME=$(/usr/libexec/PlistBuddy -c "Print :CFBundleIconName" "$APP/Info.plist")
-          test "$ICON_NAME" = "AppIcon"
+          if [ ! -d "$APP" ]; then
+            echo "::error::built .app bundle is missing: $APP"
+            exit 1
+          fi
+          if [ ! -s "$APP/Assets.car" ]; then
+            echo "::error::Assets.car is missing or empty; the asset catalog was not compiled into the app"
+            exit 1
+          fi
+          if ! ICON_NAME=$(/usr/libexec/PlistBuddy -c "Print :CFBundleIconName" "$APP/Info.plist"); then
+            echo "::error::CFBundleIconName is missing from the built Info.plist"
+            /usr/libexec/PlistBuddy -c "Print :CFBundleIcons" "$APP/Info.plist" || true
+            exit 1
+          fi
+          if [ "$ICON_NAME" != "AppIcon" ]; then
+            echo "::error::CFBundleIconName=$ICON_NAME, expected AppIcon"
+            exit 1
+          fi
           echo "AppIcon compiled: Assets.car present, CFBundleIconName=$ICON_NAME"
 
       - name: Package Payload zip
