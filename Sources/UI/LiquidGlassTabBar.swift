@@ -13,6 +13,7 @@ struct LiquidGlassTabBar: View {
 
     /// 拖动过程中的指示器位移；手指松开后回到选中 Tab 的中心。
     @GestureState private var dragOffset: CGFloat = 0
+    @Namespace private var glassNamespace
 
     var body: some View {
         GeometryReader { proxy in
@@ -22,40 +23,106 @@ struct LiquidGlassTabBar: View {
             let dragLimit = itemWidth
             let visibleDrag = min(max(dragOffset, -dragLimit), dragLimit)
 
-            ZStack(alignment: .leading) {
-                Capsule()
-                    .fill(.ultraThinMaterial)
-
-                // 指示器直接跟随 dragOffset 移动，松手后由 selected 的更新完成吸附。
-                Capsule()
-                    .fill(Theme.tabBarIndicator)
-                    .overlay {
-                        Capsule()
-                            .stroke(Color.white.opacity(0.18), lineWidth: 0.6)
-                    }
-                    .shadow(color: .white.opacity(dragOffset == 0 ? 0.08 : 0.18), radius: 8)
-                    .frame(width: itemWidth, height: 54)
-                    .offset(x: 6 + CGFloat(selectedIndex) * itemWidth + visibleDrag)
-
-                HStack(spacing: 0) {
-                    ForEach(Array(tabs.enumerated()), id: \.offset) { index, tab in
-                        tabButton(index: index, tab: tab)
-                            .frame(width: itemWidth)
-                    }
-                }
-                .padding(6)
-            }
+            tabBarSurface(
+                itemWidth: itemWidth,
+                selectedIndex: selectedIndex,
+                visibleDrag: visibleDrag
+            )
             .contentShape(Capsule())
             .simultaneousGesture(dragGesture(itemWidth: itemWidth))
-            .overlay(
-                Capsule()
-                    .stroke(Color.white.opacity(0.12), lineWidth: 0.5)
-            )
         }
         .frame(height: 66)
         .shadow(color: .black.opacity(0.3), radius: 12, y: 6)
         .padding(.horizontal, 56)
         .padding(.bottom, 8)
+    }
+
+    /// iOS 26 / Xcode 26 使用 Apple 原生 Liquid Glass；旧 SDK/旧系统走兼容实现。
+    @ViewBuilder
+    private func tabBarSurface(
+        itemWidth: CGFloat,
+        selectedIndex: Int,
+        visibleDrag: CGFloat
+    ) -> some View {
+        #if compiler(>=6.2)
+        if #available(iOS 26.0, *) {
+            GlassEffectContainer(spacing: 12) {
+                ZStack(alignment: .leading) {
+                    // 外层玻璃承载整条 Tab 栏，系统负责背景采样、折射和高光。
+                    Color.clear
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .glassEffect(.regular, in: Capsule())
+
+                    // 选中滑块也使用原生玻璃，并保留拖动过程中的几何位移。
+                    Capsule()
+                        .fill(Color.white.opacity(0.06))
+                        .frame(width: itemWidth, height: 54)
+                        .glassEffect(
+                            .regular.tint(Color.white.opacity(0.16)).interactive(),
+                            in: Capsule()
+                        )
+                        .glassEffectID("selected-tab", in: glassNamespace)
+                        .offset(x: 6 + CGFloat(selectedIndex) * itemWidth + visibleDrag)
+
+                    tabLabels(itemWidth: itemWidth)
+                }
+                .padding(6)
+            }
+            .overlay {
+                Capsule()
+                    .stroke(Color.white.opacity(0.12), lineWidth: 0.5)
+            }
+        } else {
+            legacyTabBarSurface(
+                itemWidth: itemWidth,
+                selectedIndex: selectedIndex,
+                visibleDrag: visibleDrag
+            )
+        }
+        #else
+        legacyTabBarSurface(
+            itemWidth: itemWidth,
+            selectedIndex: selectedIndex,
+            visibleDrag: visibleDrag
+        )
+        #endif
+    }
+
+    private func legacyTabBarSurface(
+        itemWidth: CGFloat,
+        selectedIndex: Int,
+        visibleDrag: CGFloat
+    ) -> some View {
+        ZStack(alignment: .leading) {
+            Capsule()
+                .fill(.ultraThinMaterial)
+
+            Capsule()
+                .fill(Theme.tabBarIndicator)
+                .overlay {
+                    Capsule()
+                        .stroke(Color.white.opacity(0.18), lineWidth: 0.6)
+                }
+                .shadow(color: .white.opacity(dragOffset == 0 ? 0.08 : 0.18), radius: 8)
+                .frame(width: itemWidth, height: 54)
+                .offset(x: 6 + CGFloat(selectedIndex) * itemWidth + visibleDrag)
+
+            tabLabels(itemWidth: itemWidth)
+        }
+        .padding(6)
+        .overlay {
+            Capsule()
+                .stroke(Color.white.opacity(0.12), lineWidth: 0.5)
+        }
+    }
+
+    private func tabLabels(itemWidth: CGFloat) -> some View {
+        HStack(spacing: 0) {
+            ForEach(Array(tabs.enumerated()), id: \.offset) { index, tab in
+                tabButton(index: index, tab: tab)
+                    .frame(width: itemWidth)
+            }
+        }
     }
 
     private func tabButton(index: Int, tab: (icon: String, title: String)) -> some View {

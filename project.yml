@@ -44,6 +44,8 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.aiphotoinbox.app
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        # 明确写入生成的 Info.plist，确保重签名工具仍能找到主图标资源。
+        INFOPLIST_KEY_CFBundleIconName: AppIcon
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
         INFOPLIST_KEY_NSPhotoLibraryUsageDescription: "需要访问你的相册来整理和筛选照片；删除操作永远经系统确认框由你亲自批准。"

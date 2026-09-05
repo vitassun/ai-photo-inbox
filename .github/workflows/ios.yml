@@ -114,6 +114,15 @@ jobs:
             CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY="" \
             build
 
+      - name: Verify compiled app icon metadata
+        run: |
+          APP="build/Build/Products/Release-iphoneos/AIPhotoInbox.app"
+          test -d "$APP"
+          test -s "$APP/Assets.car"
+          ICON_NAME=$(/usr/libexec/PlistBuddy -c "Print :CFBundleIconName" "$APP/Info.plist")
+          test "$ICON_NAME" = "AppIcon"
+          echo "AppIcon compiled: Assets.car present, CFBundleIconName=$ICON_NAME"
+
       - name: Package Payload zip
         run: |
           mkdir -p Payload
