@@ -63,7 +63,10 @@ final class VisionAnalysisService: VisionAnalysisServiceProtocol {
             saliency = salientObjects.map { Double($0.confidence) }.max()
         }
 
-        // aesthetics：iOS18 美学总分 [-1,1] → [0,1]。模拟器不支持 → 保持 nil → 中性值。
+        // aesthetics：iOS18 美学总分 [-1,1] → [0,1]。模拟器可能返回一个
+        // 看似有效但不代表真实能力的占位分数，因此必须保持 nil → 中性值；
+        // 真机才读取真实结果。
+        #if !targetEnvironment(simulator)
         if let request = try? VNCalculateImageAestheticsScoresRequest(),
            (try? handler.perform([request])) != nil {
             // legacy request 返回 VNImageAestheticsScoresObservation；
@@ -73,6 +76,7 @@ final class VisionAnalysisService: VisionAnalysisServiceProtocol {
                 aesthetics = max(0, min(1, (Double(observation.overallScore) + 1) / 2))
             }
         }
+        #endif
 
         return .success(VisionResultAggregator.aggregate(
             clarity: clarity,
