@@ -38,9 +38,8 @@ targets:
     platform: iOS
     sources:
       - path: Sources
-    resources:
-      # 显式指向资产目录；如果只写 Resources 文件夹，XcodeGen 会把
-      # Assets.xcassets 当作普通资源目录，最终 .app 不会生成 Assets.car。
+      # XcodeGen 需要把 .xcassets 作为 source 节点识别，才能生成
+      # Compile Asset Catalog 阶段和最终的 Assets.car。
       - path: Resources/Assets.xcassets
     settings:
       base:
