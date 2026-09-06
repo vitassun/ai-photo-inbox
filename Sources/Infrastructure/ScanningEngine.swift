@@ -573,7 +573,9 @@ final class ScanningEngine: ScanningEngineProtocol {
                 photoLibrary.fetchAllAssets().filter { !$0.localIdentifier.isEmpty }
             )
             let savedRecords = storedAssetSnapshotOnQueue()
-            let metadataChanged = savedRecords.map { !assetSnapshotsMatch($0, currentRecords) } ?? false
+            // 没有可比较的资产快照时，不能证明数据库中的特征仍对应当前相册。
+            // 兼容旧版本/手工断点要以正确性优先，清掉旧特征后从 hashing 重算。
+            let metadataChanged = savedRecords.map { !assetSnapshotsMatch($0, currentRecords) } ?? true
 
             // 即使没有保存快照（兼容旧版本/手工断点），也要把当前全库同步进
             // assets 表，清理已删除资产及其级联特征，避免恢复后数据库落后。
