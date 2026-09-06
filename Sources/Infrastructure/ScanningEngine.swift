@@ -708,6 +708,7 @@ final class ScanningEngine: ScanningEngineProtocol {
         ]
         guard store.setStringsAtomically(roundValues) else {
             setPersistenceErrorOnQueue("扫描轮次保存失败，请检查存储空间后重试")
+            return
         }
     }
 

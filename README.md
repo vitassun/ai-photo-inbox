@@ -1,6 +1,7 @@
 # AI Photo Inbox — iOS 工程
 
-iOS 相册整理 App（深度清理 + Daily Inbox + 截图任务管家）的工程骨架。
+iOS 相册整理 App（深度清理 + Daily Inbox + 截图任务管家）。扫描、建议、
+删除确认和本地持久化均已接入，真机相册权限与 PhotoKit 确认框仍需在设备上验收。
 产品与可行性全貌见 `../docs/feasibility-report.md`；本 README 只讲工程怎么跑。
 
 ## 目录结构
@@ -17,7 +18,7 @@ ios/
 │   │   ├── Scoring/             # KeepScore —— 保留分引擎（T06）
 │   │   ├── Scanning/            # ScanStateMachine —— 可恢复扫描状态机（T07）
 │   │   └── Protocols/           # KeyValueStore / PhotoLibraryService / VisionAnalysisService
-│   └── Infrastructure/          # PhotoKit/Vision 适配层：允许 import 框架，V1 为 TODO 占位
+│   └── Infrastructure/          # PhotoKit/Vision 适配层：允许 import 框架
 │       ├── SystemPhotoLibraryService.swift   (T02/T10)
 │       └── VisionAnalysisService.swift       (T05)
 ├── Tests/                       # 纯逻辑单测，CI 模拟器可跑，无需真机
@@ -64,7 +65,20 @@ project.yml 里因此写的是 `5.0`，写 `5.9` 会直接构建失败。
 | `Unable to find a device matching ... iPhone 16` | runner 镜像更新换代了，把 destination 里的机型名换成 `simctl list devices available` 里实际存在的 |
 | `SWIFT_VERSION 'x' is unsupported` | 语言模式只能 4.0/4.2/5.0/6.0，别写编译器版本号 |
 | 测试宿主启动失败 | 检查 App 是否有 `@main` 入口（AppRoot.swift 不许删） |
-| signing 报错 | 模拟器构建不需要证书；仍报错就在 xcodebuild 后加 `CODE_SIGNING_ALLOWED=NO` |
+| signing 报错 | 模拟器构建不需要证书；设备构建由 CI 使用 `CODE_SIGNING_ALLOWED=NO` |
+
+## 当前验收状态
+
+- 删除红线：收藏、编辑过、组内没有直接替代、用户保留的资产不会自动预选；视频和
+  Live Photo 只展示并允许用户逐张选择。所有删除都经过 PhotoKit 系统确认框。
+- 恢复安全：保留记录、资产修改时间、特征算法版本和 Vision 请求版本均参与建议复核；
+  无法确认安全数据或特征新鲜度时暂停/收窄建议。
+- 持久化：扫描结果通过单事务快照保存，快照不包含 GPS；写入失败会暂停并显示错误。
+  相册局部变更只失效相关组，其他结果继续保留。
+- 评测：运行 `python3 Tools/Regression/run_regression.py <dataset_dir>`。数据集只放在
+  本地，脚本检查正负例、标注 ID、向量覆盖率和维度，并将漏拆率纳入达标条件。
+- 真机待验收：权限缩小、后台恢复、全选后收藏/编辑、替代资产被删除、部分删除批次
+  取消，以及视频/Live Photo 播放预览。
 
 ## 真机安装：Sideloadly + 免费 Apple ID（无开发者账号路线）
 
@@ -95,11 +109,11 @@ V1 自用/内测不需要 $99/年 的开发者账号：
 |---|---|---|
 | T01 | 项目骨架与 CI 绿灯 | project.yml / .github/workflows/ios.yml / 全部测试 |
 | T02 | 授权与资产拉取层（含变更监听） | Infrastructure/SystemPhotoLibraryService.swift |
-| T03 | 扫描状态机接入真实管线 + GRDB 持久化 | ScanStateMachine 接线 + KeyValueStore 生产实现 |
+| T03 | 扫描状态机接入真实管线 + GRDB 持久化 | ScanningEngine + PhotoLibraryDatabase |
 | T04 | 时间地理分桶 + pHash 粗筛 | Core/Grouping/* + Infrastructure/PerceptualHash.swift |
-| T05 | FeaturePrint 聚类 + 阈值回归集 | Infrastructure/VisionAnalysisService.swift |
+| T05 | FeaturePrint 聚类 + 阈值回归集 | Infrastructure/VisionAnalysisService.swift + Tools/Regression |
 | T06 | 低质量检测 DSP + EXIF 夜间白名单 | Core/Quality/ImageQualityDSP.swift |
 | T07 | 大媒体估算模型 + LivePhoto 配对 | Core/Media/* |
-| T08 | Best Shot 特征整合（人脸/显著性/美学） | VisionAnalysisService 产出特征，消费方待建 |
-| T09 | 保留分引擎接线 + SafetyRules 集成 | 管线挂载点待建 |
-| T10 | 安全删除流（确认框/批量 UI/教育页） | SystemPhotoLibraryService.requestDelete |
+| T08 | Best Shot 特征整合（人脸/显著性/美学） | VisionAnalysisService + ScanningEngine scoring |
+| T09 | 保留分引擎接线 + SafetyRules 集成 | GroupScoring + SafetyRules |
+| T10 | 安全删除流（确认框/批量 UI/教育页） | DeletionCoordinator + SystemPhotoLibraryService |
