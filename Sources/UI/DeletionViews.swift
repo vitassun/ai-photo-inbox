@@ -173,6 +173,7 @@ struct DeletionReviewView: View {
                                 }
                             }
                             .font(.caption)
+                            .disabled(group.preselectableIDs.isEmpty)
                         }
                     }
                 }
