@@ -553,6 +553,7 @@ final class ScanningEngine: ScanningEngineProtocol {
         }
         let safeLowQuality = restoredLowQuality.compactMap { candidate -> LowQualityCandidate? in
             guard currentIDs.contains(candidate.record.localIdentifier),
+                  !protectedIDs.contains(candidate.record.localIdentifier),
                   !candidate.record.favorite, !candidate.record.isEdited else { return nil }
             return LowQualityCandidate(
                 record: candidate.record,
@@ -564,6 +565,7 @@ final class ScanningEngine: ScanningEngineProtocol {
         }
         let safeLargeMedia = restoredLargeMedia.compactMap { candidate -> LargeMediaCandidate? in
             guard currentIDs.contains(candidate.record.localIdentifier),
+                  !protectedIDs.contains(candidate.record.localIdentifier),
                   !candidate.record.favorite, !candidate.record.isEdited else { return nil }
             return LargeMediaCandidate(
                 record: candidate.record,

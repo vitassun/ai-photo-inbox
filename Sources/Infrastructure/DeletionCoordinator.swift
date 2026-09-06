@@ -122,12 +122,17 @@ final class DeletionCoordinator {
                 blocked.append(issue(selection, reason: .missingFeature))
                 continue
             }
+            // Validate this candidate against the final selection set while
+            // leaving the candidate itself out of that set.  Otherwise the
+            // safety helper quite correctly excludes every selected id and
+            // the preflight would reject the very suggestions the user chose.
+            let otherSelectedIDs = selectedIDs.subtracting([selection.assetID])
             let currentSuggestions = GroupScoring.preselectableIDs(
                 for: members,
                 hashByID: hashes,
                 embeddingByID: embeddings,
                 protectedIDs: keepIDs,
-                selectedIDs: selectedIDs
+                selectedIDs: otherSelectedIDs
             )
             guard currentSuggestions.contains(selection.assetID) else {
                 blocked.append(issue(selection, reason: .noDirectReplacement))
