@@ -106,6 +106,19 @@ jobs:
             exit 1
           fi
 
+      # 测试工件必须挂在 test 任务内（含 always()），任务失败也能下载日志与 xcresult；
+      # device-build 无法读取本任务的 /tmp 与 build 目录，之前放在那边导致归档永远为空。
+      - name: Upload test result bundle and complete log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: AIPhotoInbox-test-results
+          path: |
+            /tmp/xcodebuild.log
+            build/AIPhotoInbox-tests.xcresult
+          if-no-files-found: warn
+          retention-days: 14
+
   # 免签名设备构建：产出 Payload zip（下载后改名 .ipa 喂 Sideloadly）。
   # 免费签名路线不需要开发者账号；签名动作在用户本机的 Sideloadly 完成。
   device-build:
@@ -142,17 +155,6 @@ jobs:
             tail -120 /tmp/xcodebuild-device.log
             exit 1
           fi
-
-      - name: Upload test result bundle and complete log
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: AIPhotoInbox-test-results
-          path: |
-            /tmp/xcodebuild.log
-            build/AIPhotoInbox-tests.xcresult
-          if-no-files-found: warn
-          retention-days: 14
 
       - name: Verify compiled app icon metadata
         run: |
