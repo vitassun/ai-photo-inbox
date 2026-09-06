@@ -249,15 +249,17 @@ final class ScanningEngineTests: XCTestCase {
         let persistedHex = String(repeating: "a", count: 16)
         for id in ["asset-0", "asset-1"] {
             // 特征表有外键，先落父资产行；哈希经信封编码写入（带类型标记字节）。
-            database.upsert(asset: makeRecord(
+            let record = makeRecord(
                 id: id,
                 creationDate: Date(timeIntervalSince1970: 1_700_000_000 + (id == "asset-0" ? 0 : 30))
-            ), fetchedAt: Date())
+            )
+            database.upsert(asset: record, fetchedAt: Date())
             database.upsertFeatureprint(
                 assetId: id,
                 data: FeaturePrintCodec.encodeHash(persistedHex),
                 featureVersion: ScanStateMachine.featureVersion,
-                computedAt: Date()
+                computedAt: Date(),
+                assetVersion: record.modificationDate
             )
         }
 
