@@ -45,12 +45,14 @@ final class ScanningEngineTests: XCTestCase {
         mediaType: AssetMediaType = .image,
         creationDate: Date? = nil,
         latitude: Double? = nil,
-        longitude: Double? = nil
+        longitude: Double? = nil,
+        favorite: Bool = false,
+        isEdited: Bool = false
     ) -> AssetRecord {
         AssetRecord(
             localIdentifier: id,
-            favorite: false,
-            isEdited: false,
+            favorite: favorite,
+            isEdited: isEdited,
             mediaType: mediaType,
             pixelWidth: 100,
             pixelHeight: 100,
@@ -252,7 +254,7 @@ final class ScanningEngineTests: XCTestCase {
             database.upsertFeatureprint(
                 assetId: id,
                 data: FeaturePrintCodec.encodeHash(persistedHex),
-                featureVersion: 1,
+                featureVersion: ScanStateMachine.featureVersion,
                 computedAt: Date()
             )
         }
@@ -278,11 +280,11 @@ final class ScanningEngineTests: XCTestCase {
         // 哈希复用的本质断言：持久化哈希未被覆盖（hashing 阶段没有重算）。
         // 注：T09 起 scoring 阶段会为缺分数的资产再调 loader，属正常路径。
         XCTAssertEqual(
-            database.allFeatureprintHashes(featureVersion: 1)["asset-0"],
+            database.allFeatureprintHashes(featureVersion: ScanStateMachine.featureVersion)["asset-0"],
             persistedHex
         )
         XCTAssertEqual(
-            database.allFeatureprintHashes(featureVersion: 1)["asset-1"],
+            database.allFeatureprintHashes(featureVersion: ScanStateMachine.featureVersion)["asset-1"],
             persistedHex
         )
 
@@ -379,6 +381,112 @@ final class ScanningEngineTests: XCTestCase {
         XCTAssertEqual(engine.state, .done)
         XCTAssertEqual(fakeService.fetchAllCallCount, 2, "done 重扫必须重新进 fetching")
         XCTAssertEqual(engine.scoredGroups.count, 1, "重扫后视图重建而非残留")
+    }
+
+    func testCompletedResultsRestoreAcrossEngineRecreationAndInvalidateOnMetadataChange() throws {
+        let database = try PhotoLibraryDatabase.inMemory()
+        let store = GRDBKeyValueStore(database: database)
+        let base = Date(timeIntervalSince1970: 1_700_000_000)
+        let records = [
+            makeRecord(id: "restore-a", creationDate: base),
+            makeRecord(id: "restore-b", creationDate: base.addingTimeInterval(30)),
+        ]
+
+        let firstQueue = DispatchQueue(label: "test.engine.restore.first")
+        let firstService = FakePhotoLibraryService(records: records)
+        let first = ScanningEngine(
+            photoLibrary: firstService,
+            database: database,
+            store: store,
+            imageDataLoader: { _ in Data([1, 2, 3]) },
+            hashComputer: { _ in String(repeating: "a", count: 16) },
+            workQueue: firstQueue
+        )
+        runAndWait(first, workQueue: firstQueue, progressLog: ProgressLog())
+        XCTAssertEqual(first.scoredGroups.count, 1)
+        XCTAssertNotNil(store.string(forKey: "scan.scoredGroups"))
+
+        // 新引擎先恢复 done 快照，再校验当前 PhotoKit 元数据；不必重新跑整轮扫描。
+        let secondQueue = DispatchQueue(label: "test.engine.restore.second")
+        let secondService = FakePhotoLibraryService(records: records)
+        let second = ScanningEngine(
+            photoLibrary: secondService,
+            database: database,
+            store: store,
+            workQueue: secondQueue
+        )
+        secondQueue.sync { }
+        XCTAssertEqual(second.state, .done)
+        XCTAssertEqual(second.scoredGroups.count, 1)
+        XCTAssertEqual(secondService.fetchAllCallCount, 1)
+
+        // 收藏状态变化会使保存的结果失效，不能继续显示旧的完成清单。
+        let changedRecords = [
+            makeRecord(id: "restore-a", creationDate: base),
+            makeRecord(id: "restore-b", creationDate: base.addingTimeInterval(30), favorite: true),
+        ]
+        let thirdQueue = DispatchQueue(label: "test.engine.restore.changed")
+        let third = ScanningEngine(
+            photoLibrary: FakePhotoLibraryService(records: changedRecords),
+            database: database,
+            store: store,
+            workQueue: thirdQueue
+        )
+        thirdQueue.sync { }
+        XCTAssertEqual(third.state, .idle)
+        XCTAssertTrue(third.scoredGroups.isEmpty)
+        XCTAssertNil(store.string(forKey: "scan.scoredGroups"))
+    }
+
+    func testResumeSyncsCurrentAssetsAndInvalidatesChangedSnapshotFeatures() throws {
+        let database = try PhotoLibraryDatabase.inMemory()
+        let store = GRDBKeyValueStore(database: database)
+        let base = Date(timeIntervalSince1970: 1_700_000_000)
+        let savedRecords = [
+            makeRecord(id: "resume-a", creationDate: base),
+            makeRecord(id: "resume-b", creationDate: base.addingTimeInterval(30)),
+        ]
+        let currentRecords = [
+            savedRecords[0],
+            makeRecord(id: "resume-b", creationDate: base.addingTimeInterval(30), favorite: true),
+            makeRecord(id: "resume-c", creationDate: base.addingTimeInterval(60)),
+        ]
+
+        for record in savedRecords {
+            database.upsert(asset: record, fetchedAt: base)
+            database.upsertFeatureprint(
+                assetId: record.localIdentifier,
+                data: FeaturePrintCodec.encodeHash(String(repeating: "a", count: 16)),
+                featureVersion: ScanStateMachine.featureVersion,
+                computedAt: base
+            )
+        }
+        let encoder = JSONEncoder()
+        store.setString(String(ScanStateMachine.featureVersion), forKey: "scan.featureVersion")
+        store.setString(
+            String(data: try encoder.encode(ScanPhase.hashing), encoding: .utf8),
+            forKey: "scan.phase"
+        )
+        store.setString("0", forKey: "scan.progress")
+        store.setString(
+            String(data: try encoder.encode(savedRecords), encoding: .utf8),
+            forKey: "scan.resultAssets"
+        )
+
+        let queue = DispatchQueue(label: "test.engine.resume.changed-snapshot")
+        let engine = ScanningEngine(
+            photoLibrary: FakePhotoLibraryService(records: currentRecords),
+            database: database,
+            store: store,
+            imageDataLoader: { _ in nil },
+            hashComputer: { _ in nil },
+            workQueue: queue
+        )
+        runAndWait(engine, workQueue: queue, progressLog: ProgressLog())
+
+        XCTAssertEqual(engine.state, .done)
+        XCTAssertEqual(database.assetCount(), 3, "恢复前应先同步当前相册资产")
+        XCTAssertEqual(database.featureprintCount(), 0, "元数据变化后不得复用旧特征")
     }
 
     // MARK: 暂停中按"开始/继续扫描"：应原地续跑而非静默卡死

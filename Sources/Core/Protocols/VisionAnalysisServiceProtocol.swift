@@ -7,7 +7,7 @@ import Foundation
 
 /// 单张图的全套分析产物。全部归一化 0~1；
 /// 能力缺失时给中性值 0.5，不得给 0（会系统性拉低所有照片）。
-struct VisionAnalysisResult: Equatable {
+struct VisionAnalysisResult: Codable, Equatable {
     var clarity: Double
     var aesthetics: Double
     var faceQuality: Double

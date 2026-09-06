@@ -6,7 +6,7 @@
 import Foundation
 
 /// 低质量种类（P6 三分区；rawValue 落 decisions reason）。
-enum LowQualityKind: String, Equatable {
+enum LowQualityKind: String, Codable, Equatable {
     case blurry
     case overexposed
     case underexposed
@@ -14,12 +14,20 @@ enum LowQualityKind: String, Equatable {
 
 /// 一个低质量候选：kind 决定页面分区；isNightExempt 只展示角标，永不进预选集合
 /// （红线 6：intentional 模糊/夜景长曝不推荐删除）。
-struct LowQualityCandidate: Equatable {
+struct LowQualityCandidate: Codable, Equatable {
     let record: AssetRecord
     let kind: LowQualityKind
     /// 触发时的 clarity 分（调试与解释文案用）。
     let clarity: Double
     let isNightExempt: Bool
+    /// 低质量 pass 只处理未被相似组认领的资产。此类资产没有已知替代品，
+    /// 因而可以展示给用户，但永远不能被“全选建议”自动预选。
+    /// 默认值保留旧的纯逻辑构造调用；真实扫描时由引擎显式置为 true。
+    let isOnlyInGroup: Bool = false
+
+    var canPreselect: Bool {
+        LowQualityDetector.preselectable(self)
+    }
 }
 
 enum LowQualityDetector {
@@ -54,7 +62,15 @@ enum LowQualityDetector {
             return .overexposed
         case (false, false, true):
             return .underexposed
-        case (_, true, _) where safeOverRatio >= 0.5:
+        case (true, true, false) where safeOverRatio >= AppConfig.lowQualityExposureDominanceRatio:
+            // 模糊同时伴随大面积过曝时，曝光问题更具决定性；
+            // 过曝占比不足主导阈值则保留模糊标签（见 default）。
+            return .overexposed
+        case (false, true, true):
+            // 两种曝光异常同时达到阈值时，选择占比更大的实际问题；
+            // 不能落入 default 把一张清晰照片错误标成模糊。
+            return safeOverRatio >= safeUnderRatio ? .overexposed : .underexposed
+        case (true, true, true) where safeOverRatio >= AppConfig.lowQualityExposureDominanceRatio:
             return .overexposed
         case (true, _, true):
             // 糊 + 欠曝且过曝未达主导：欠曝更难挽回，取欠曝。
@@ -67,7 +83,8 @@ enum LowQualityDetector {
     /// 预选集合红线（SafetyRules 同源口径）：收藏/编辑过永不入选；
     /// 夜间豁免只标记不预选。
     static func preselectable(_ candidate: LowQualityCandidate) -> Bool {
-        !candidate.record.favorite && !candidate.record.isEdited && !candidate.isNightExempt
+        !candidate.record.favorite && !candidate.record.isEdited
+            && !candidate.isNightExempt && !candidate.isOnlyInGroup
     }
 
     private static func sanitizedRatio(_ value: Double?) -> Double {

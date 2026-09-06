@@ -110,6 +110,45 @@ final class PhotoLibraryDatabaseTests: XCTestCase {
         XCTAssertNotNil(database.row(forSQL: "SELECT 1 FROM assets WHERE local_identifier = 'current'"))
     }
 
+    func testReplaceAssetSnapshotWithEmptyLibraryRemovesEveryRow() throws {
+        let database = try makeDatabase()
+        database.upsert(asset: makeAsset(id: "stale-1"), fetchedAt: Date())
+        database.upsert(asset: makeAsset(id: "stale-2"), fetchedAt: Date())
+
+        database.replaceAssetSnapshot([], fetchedAt: Date())
+
+        XCTAssertEqual(database.assetCount(), 0)
+        XCTAssertEqual(database.featureprintCount(), 0, "外键级联应一并清掉孤立特征")
+    }
+
+    func testAutomaticDeleteCleanupPreservesUserDecision() throws {
+        let database = try makeDatabase()
+        for id in ["auto-low", "auto-large", "user-delete", "user-keep"] {
+            database.upsert(asset: makeAsset(id: id, favorite: false), fetchedAt: Date())
+        }
+        database.setDecision(assetId: "auto-low", verdict: .delete, reason: "low_quality:blurry", decidedAt: Date())
+        database.setDecision(assetId: "auto-large", verdict: .delete, reason: "large_media", decidedAt: Date())
+        database.setDecision(assetId: "user-delete", verdict: .delete, reason: "user_selected", decidedAt: Date())
+        database.setDecision(assetId: "user-keep", verdict: .keep, reason: "user_override", decidedAt: Date())
+
+        database.clearAutomaticDeleteDecisions()
+
+        XCTAssertNil(database.decision(assetId: "auto-low"))
+        XCTAssertNil(database.decision(assetId: "auto-large"))
+        XCTAssertEqual(database.decision(assetId: "user-delete")?.verdict, .delete)
+        XCTAssertEqual(database.decision(assetId: "user-keep")?.verdict, .keep)
+    }
+
+    func testAutomaticDeleteCleanupWithEmptyIDListIsNoOp() throws {
+        let database = try makeDatabase()
+        database.upsert(asset: makeAsset(id: "auto"), fetchedAt: Date())
+        database.setDecision(assetId: "auto", verdict: .delete, reason: "large_media", decidedAt: Date())
+
+        database.clearAutomaticDeleteDecisions(assetIds: [])
+
+        XCTAssertEqual(database.decision(assetId: "auto")?.verdict, .delete)
+    }
+
     // MARK: featureprints 表
 
     func testFeatureprintsRoundTripAndVersionMismatch() throws {
@@ -161,15 +200,16 @@ final class PhotoLibraryDatabaseTests: XCTestCase {
         for id in ["old-1", "cur-1", "cur-2", "newer-9"] {
             database.upsert(asset: makeAsset(id: id), fetchedAt: Date())
         }
-        for (id, version) in [("old-1", 0), ("cur-1", 1), ("cur-2", 1), ("newer-9", 9)] {
+        let currentVersion = ScanStateMachine.featureVersion
+        for (id, version) in [("old-1", 0), ("cur-1", currentVersion), ("cur-2", currentVersion), ("newer-9", 9)] {
             database.upsertFeatureprint(assetId: id, data: Data([1]), featureVersion: version, computedAt: Date())
         }
         XCTAssertEqual(database.featureprintCount(), 4, "前置断言：脏数据确实已入库")
 
         database.purgeFeatureprints(keepingFeatureVersion: ScanStateMachine.featureVersion)
 
-        XCTAssertEqual(database.featureprintCount(), 2)   // 只剩 version==1 的两行
-        XCTAssertEqual(database.featureprint(assetId: "cur-1", featureVersion: 1)?.count, 1)
+        XCTAssertEqual(database.featureprintCount(), 2)   // 只剩当前版本的两行
+        XCTAssertEqual(database.featureprint(assetId: "cur-1", featureVersion: currentVersion)?.count, 1)
         XCTAssertNil(database.featureprint(assetId: "old-1", featureVersion: 0))
     }
 

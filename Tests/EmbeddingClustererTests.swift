@@ -121,14 +121,17 @@ final class EmbeddingClustererTests: XCTestCase {
         database.upsertFeatureprint(
             assetId: "e1",
             data: FeaturePrintCodec.encodeEmbedding(vector),
-            featureVersion: 1,
+            featureVersion: ScanStateMachine.featureVersion,
             computedAt: Date()
         )
 
-        XCTAssertEqual(database.allFeatureprintEmbeddings(featureVersion: 1)["e1"]?.count, 2)
-        XCTAssertTrue(database.allFeatureprintEmbeddings(featureVersion: 2).isEmpty, "版本不符视为不存在")
+        XCTAssertEqual(database.allFeatureprintEmbeddings(featureVersion: ScanStateMachine.featureVersion)["e1"]?.count, 2)
+        XCTAssertTrue(
+            database.allFeatureprintEmbeddings(featureVersion: ScanStateMachine.featureVersion + 1).isEmpty,
+            "版本不符视为不存在"
+        )
         // 哈希读回不受 embedding 行干扰。
-        XCTAssertTrue(database.allFeatureprintHashes(featureVersion: 1).isEmpty)
+        XCTAssertTrue(database.allFeatureprintHashes(featureVersion: ScanStateMachine.featureVersion).isEmpty)
     }
 
     private func makeRecord(id: String) -> AssetRecord {

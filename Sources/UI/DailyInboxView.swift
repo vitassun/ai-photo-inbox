@@ -19,6 +19,9 @@ struct DailyInboxView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
+                if let warning = environment.persistenceWarning {
+                    persistenceWarningBanner(warning)
+                }
                 if authStatus == .limited {
                     limitedBanner
                 }
@@ -50,6 +53,9 @@ struct DailyInboxView: View {
         .onAppear(perform: refresh)
         .onChange(of: scenePhase) { phase in
             if phase == .active { refresh() }
+        }
+        .onChange(of: environment.libraryRevision) { _ in
+            refresh()
         }
     }
 
@@ -220,7 +226,7 @@ struct DailyInboxView: View {
             )
         }
         .buttonStyle(.plain)
-        .disabled(isScanning || scanStatusText?.contains("中") == true)
+        .disabled(isScanning)
     }
 
     private var scanStatusView: some View {
@@ -254,6 +260,7 @@ struct DailyInboxView: View {
                 NavigationLink {
                     DeletionReviewView(
                         candidates: environment.scoredGroupsSnapshotView(),
+                        environment: environment,
                         deletionService: environment.photoLibraryService,
                         database: environment.database,
                         onDeleted: { ids in
@@ -266,10 +273,9 @@ struct DailyInboxView: View {
                     entryRowLabel(
                         icon: "square.stack.3d.down.right",
                         iconColor: Theme.accentBlue,
-                        title: "待删除认清单",
+                        title: "待删除清单",
                         subtitle: "审核 AI 标记的可删除照片",
-                        badge: environment.engine.scoredGroups
-                            .reduce(0) { $0 + $1.preselectableIDs.count }
+                        badge: environment.engine.pendingDeletionIDs.count
                     )
                 }
                 .buttonStyle(.plain)
@@ -283,7 +289,7 @@ struct DailyInboxView: View {
                         title: "低质量清理",
                         subtitle: "模糊、过暗等低质量照片",
                         badge: environment.lowQualitySnapshot()
-                            .filter { !$0.isNightExempt }.count
+                            .filter(\.canPreselect).count
                     )
                 }
                 .buttonStyle(.plain)
@@ -297,7 +303,7 @@ struct DailyInboxView: View {
                         title: "大媒体清理",
                         subtitle: "大视频、Live Photo 等",
                         badge: environment.largeMediaSnapshot()
-                            .filter { $0.record.locallyAvailable }.count
+                            .filter(\.canPreselect).count
                     )
                 }
                 .buttonStyle(.plain)
@@ -354,6 +360,23 @@ struct DailyInboxView: View {
     }
 
     // MARK: - 空态
+
+    private func persistenceWarningBanner(_ text: String) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "externaldrive.badge.exclamationmark")
+                .foregroundStyle(Theme.accentOrange)
+            Text(text)
+                .font(.footnote)
+                .foregroundStyle(Theme.bodyText)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Theme.accentOrange.opacity(0.12), in: RoundedRectangle(cornerRadius: 12))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(Theme.accentOrange.opacity(0.2), lineWidth: 0.5)
+        )
+    }
 
     private var emptyState: some View {
         VStack(spacing: 8) {

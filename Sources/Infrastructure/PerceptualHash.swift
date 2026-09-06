@@ -34,8 +34,14 @@ enum PerceptualHash {
             }
         }
 
-        let sorted = values.sorted()
-        let median = (sorted[values.count / 2 - 1] + sorted[values.count / 2]) / 2
+        // pHash 的阈值应由 AC 低频分量决定；DC 分量代表整张图平均亮度，
+        // 混入中位数会让整体变亮/变暗被误当成结构差异。
+        let medianValues = Array(values.dropFirst())
+        let sorted = medianValues.sorted()
+        let middle = medianValues.count / 2
+        let median = medianValues.count.isMultiple(of: 2)
+            ? (sorted[middle - 1] + sorted[middle]) / 2
+            : sorted[middle]
 
         var bits = ""
         bits.reserveCapacity(values.count)

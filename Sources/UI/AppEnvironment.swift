@@ -25,6 +25,9 @@ final class AppEnvironment: ObservableObject, PhotoLibraryChangeObserving {
     /// LLM 兜底客户端（T18 接线）：CloudConsent 是云端同意门闩——
     /// 未同意时零出网（本地规则路径），同意后才放行远端请求。
     let llmClient: LLMClientProtocol
+    /// 磁盘库创建失败时仍保留可运行的内存库，但必须把降级状态暴露给 UI，
+    /// 不能让用户误以为扫描/保留结果已经持久化。
+    @Published private(set) var persistenceWarning: String? = nil
 
     init() {
         let docs = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -33,9 +36,11 @@ final class AppEnvironment: ObservableObject, PhotoLibraryChangeObserving {
 
         if let diskDatabase = try? PhotoLibraryDatabase(path: dbPath) {
             database = diskDatabase
+            persistenceWarning = nil
         } else {
             do {
                 database = try PhotoLibraryDatabase.inMemory()
+                persistenceWarning = "本地数据库不可用，本次结果只保存在内存中；请检查存储空间后重启 App。"
             } catch {
                 fatalError("无法创建本地数据库：\(error)")
             }
@@ -80,7 +85,8 @@ final class AppEnvironment: ObservableObject, PhotoLibraryChangeObserving {
                 ) ?? 0
                 return (over, under)
             },
-            hasUserData: false   // V1 冷启动；用户反馈历史属后续迭代
+            // 与 tech-spec §5 对齐：有足够用户裁决历史后不再翻倍收藏加成。
+            hasUserData: database.decisionCount() >= 50
         )
 
         let remote = RemoteLLMClient(
@@ -89,6 +95,15 @@ final class AppEnvironment: ObservableObject, PhotoLibraryChangeObserving {
         )
         llmClient = ConsentGatedLLMClient(store: store, remote: remote)
 
+        engine.setResultsChangedHandler { [weak self] in
+            guard let self else { return }
+            self.libraryRevision &+= 1
+        }
+        // 引擎可能在初始化期间已经开始异步恢复 done 快照；补一次主线程
+        // 刷新，避免恢复通知早于 handler 绑定而丢失。
+        DispatchQueue.main.async { [weak self] in
+            self?.libraryRevision &+= 1
+        }
         changeMonitor.delegate = self
     }
 
@@ -101,7 +116,10 @@ final class AppEnvironment: ObservableObject, PhotoLibraryChangeObserving {
         return DailyInboxSummary(
             dayStart: dayStart,
             newAssetCount: database.countAssets(createdAtOrAfter: dayStart, before: dayEnd),
-            pendingDeletionCount: database.countDeleteVerdicts(),
+            // 结果镜像在启动时异步恢复；恢复完成前用数据库中的有效自动
+            // 裁决兜底，避免摘要短暂显示为 0。扫描完成后以内存建议为准。
+            pendingDeletionCount: max(engine.pendingDeletionIDs.count,
+                                      database.countDeleteVerdicts()),
             actionCount: database.countActions(atOrAfter: dayStart, before: dayEnd)
         )
     }
@@ -115,7 +133,7 @@ final class AppEnvironment: ObservableObject, PhotoLibraryChangeObserving {
             engine.purgeDeletedFromViews(assetIds: event.removedIdentifiers)
         }
 
-        let changedIDs = Array(Set(event.insertedIdentifiers + event.updatedIdentifiers))
+        let changedIDs = Array(Set(event.insertedIdentifiers + event.updatedIdentifiers)).sorted()
         let fetchedAt = Date()
         let changedRecords = changedIDs.isEmpty
             ? []

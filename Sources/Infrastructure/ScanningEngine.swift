@@ -15,9 +15,19 @@ import Foundation
 
 final class ScanningEngine: ScanningEngineProtocol {
 
+    private enum SnapshotKeys {
+        static let version = "scan.resultsVersion"
+        static let assets = "scan.resultAssets"
+        static let candidates = "scan.candidateGroups"
+        static let scored = "scan.scoredGroups"
+        static let lowQuality = "scan.lowQualityCandidates"
+        static let largeMedia = "scan.largeMediaCandidates"
+    }
+
     private let machine: ScanStateMachine
     private let photoLibrary: PhotoLibraryServiceProtocol
     private let database: PhotoLibraryDatabase
+    private let store: KeyValueStore
 
     /// 状态机的全部读写都收敛到这条串行队列。
     private let workQueue: DispatchQueue
@@ -26,6 +36,8 @@ final class ScanningEngine: ScanningEngineProtocol {
     private var phaseSnapshot: ScanPhase = .idle
     private var progressSnapshot: Double = 0
     private var pauseRequested = false
+    /// 完成结果变化通知；由 AppEnvironment 接到主线程以刷新 SwiftUI。
+    private var resultsChangedHandler: (() -> Void)?
 
     private var progressHandler: ((ScanPhase, Double) -> Void)?
 
@@ -83,6 +95,7 @@ final class ScanningEngine: ScanningEngineProtocol {
     ) {
         self.photoLibrary = photoLibrary
         self.database = database
+        self.store = store
         self.workQueue = workQueue
         self.imageDataLoader = imageDataLoader
         self.hashComputer = hashComputer
@@ -94,6 +107,14 @@ final class ScanningEngine: ScanningEngineProtocol {
         self.hasUserData = hasUserData
         self.machine = ScanStateMachine(store: store)
         publishSnapshot()
+
+        // 完成结果保存在 scan_state 中，避免重启后状态显示 done 但三个
+        // 清理入口为空。恢复在工作队列异步执行，不能阻塞 App 启动主线程。
+        if machine.phase == .done {
+            workQueue.async { [weak self] in
+                self?.hydrateCompletedSnapshotOnQueue()
+            }
+        }
     }
 
     var state: ScanPhase {
@@ -114,6 +135,12 @@ final class ScanningEngine: ScanningEngineProtocol {
         workQueue.async { [weak self] in
             guard let self else { return }
             let deleted = Set(assetIds)
+            self.fetchedRecords.removeAll { deleted.contains($0.localIdentifier) }
+            for id in deleted {
+                self.hashByID[id] = nil
+                self.embeddingByID[id] = nil
+                self.scoresByID[id] = nil
+            }
             let oldCandidateGroups = self.candidateGroupsOnQueue()
             let oldScoredGroups = self.scoredGroupsOnQueue()
             let protectedIDs = self.database.assetIDs(withVerdict: .keep)
@@ -145,7 +172,11 @@ final class ScanningEngine: ScanningEngineProtocol {
                     groupID: scored.groupID,
                     reason: scored.reason,
                     members: rebuiltMembers,
-                    preselectableIDs: GroupScoring.preselectableIDs(for: rebuiltMembers)
+                    preselectableIDs: GroupScoring.preselectableIDs(
+                        for: rebuiltMembers,
+                        hashByID: self.hashByID,
+                        embeddingByID: self.embeddingByID
+                    )
                         .filter { !protectedIDs.contains($0) }
                 ))
             }
@@ -155,6 +186,7 @@ final class ScanningEngine: ScanningEngineProtocol {
             self.lowQualitySnapshot.removeAll { deletedIds.contains($0.record.localIdentifier) }
             self.largeMediaSnapshot.removeAll { deletedIds.contains($0.record.localIdentifier) }
             self.snapshotLock.unlock()
+            self.persistSnapshotsOnQueue()
             completion?()
         }
     }
@@ -189,6 +221,7 @@ final class ScanningEngine: ScanningEngineProtocol {
             self.snapshotLock.lock()
             self.lowQualitySnapshot.removeAll { removed.contains($0.record.localIdentifier) }
             self.snapshotLock.unlock()
+            self.persistSnapshotsOnQueue()
             completion?()
         }
     }
@@ -199,13 +232,18 @@ final class ScanningEngine: ScanningEngineProtocol {
     func refreshAfterLibraryChange(records: [AssetRecord], removedIDs: [String] = []) {
         workQueue.async { [weak self] in
             guard let self else { return }
+            let removed = Set(removedIDs)
+            let changed = Set(records.map(\.localIdentifier)).union(removed)
+
+            // 先失效缓存和自动裁决，再决定是否延后到本轮扫描结束处理；
+            // 后续任何恢复路径都不能读到变更前的特征。
+            self.database.removeFeatureprints(assetIds: Array(changed))
+            self.database.clearAutomaticDeleteDecisions(assetIds: Array(changed))
             if self.machine.isActive {
                 self.pendingLibraryChange = true
                 return
             }
             self.pendingLibraryChange = false
-            let removed = Set(removedIDs)
-            let changed = Set(records.map(\.localIdentifier)).union(removed)
 
             self.fetchedRecords.removeAll { changed.contains($0.localIdentifier) }
             self.fetchedRecords.append(contentsOf: records.filter {
@@ -223,6 +261,15 @@ final class ScanningEngine: ScanningEngineProtocol {
             self.lowQualitySnapshot = []
             self.largeMediaSnapshot = []
             self.snapshotLock.unlock()
+            self.clearPersistedSnapshotsOnQueue()
+            self.notifyResultsChanged()
+
+            // 完成状态已经对应旧相册快照；退回 idle 让首页明确要求重新扫描，
+            // 避免展示“扫描完成”但内容已经过期。
+            if self.machine.phase == .done {
+                _ = self.machine.reset()
+                self.publishSnapshot()
+            }
         }
     }
 
@@ -231,6 +278,27 @@ final class ScanningEngine: ScanningEngineProtocol {
         snapshotLock.lock()
         defer { snapshotLock.unlock() }
         return largeMediaSnapshot
+    }
+
+    /// 当前扫描结果中可由“全选建议”带入确认框的 id。组建议、低质量和
+    /// 大媒体建议统一去重，首页计数与三个详情页共用这一口径。
+    var pendingDeletionIDs: Set<String> {
+        snapshotLock.lock()
+        defer { snapshotLock.unlock() }
+        var ids = Set(scoredGroupsSnapshot.flatMap(\.preselectableIDs))
+        ids.formUnion(lowQualitySnapshot.filter(\.canPreselect)
+            .map { $0.record.localIdentifier })
+        ids.formUnion(largeMediaSnapshot.filter(\.canPreselect)
+            .map { $0.record.localIdentifier })
+        return ids
+    }
+
+    /// 结果镜像不是 ObservableObject；生产装配层用这个轻量回调把完成/删除/
+    /// 恢复事件桥接到 SwiftUI。回调在主线程执行，避免页面读到半套快照。
+    func setResultsChangedHandler(_ handler: @escaping () -> Void) {
+        snapshotLock.lock()
+        resultsChangedHandler = handler
+        snapshotLock.unlock()
     }
 
     // MARK: ScanningEngineProtocol
@@ -256,10 +324,15 @@ final class ScanningEngine: ScanningEngineProtocol {
             default:
                 break
             }
-            // idle（全新/复位后）清掉非当前版本的特征脏数据；
-            // 当前版本哈希/向量保留复用，重扫不必重算。
+            // idle（全新/复位后）清掉非当前版本与旧轮次的特征数据；
+            // 当前实现没有资产内容版本，无法证明同一 id 的内容未变，
+            // 因而全量重扫必须重新计算。
             if self.machine.phase == .idle {
+                // 新一轮全量扫描没有可验证的资产内容版本；清掉旧特征，
+                // 以正确性优先，避免同一 id 的修改照片复用旧结果。
                 self.database.purgeFeatureprints(keepingFeatureVersion: ScanStateMachine.featureVersion)
+                self.database.removeAllFeatureprints()
+                self.database.clearAutomaticDeleteDecisions()
             }
             self.startDrivingOnQueue()
         }
@@ -278,6 +351,189 @@ final class ScanningEngine: ScanningEngineProtocol {
         lowQualitySnapshot = []
         largeMediaSnapshot = []
         snapshotLock.unlock()
+        clearPersistedSnapshotsOnQueue()
+    }
+
+    /// 从已完成扫描保存的值恢复候选镜像。资产元数据必须与保存时一致；
+    /// 一旦发现收藏/编辑/尺寸/时间等字段改变，整轮结果作废并回到 idle。
+    private func hydrateCompletedSnapshotOnQueue() {
+        guard machine.phase == .done else { return }
+        guard let version = store.string(forKey: SnapshotKeys.version),
+              Int(version) == ScanStateMachine.featureVersion,
+              let assetsData = store.string(forKey: SnapshotKeys.assets)?.data(using: .utf8),
+              let savedAssets = try? JSONDecoder().decode([AssetRecord].self, from: assetsData),
+              let scoredData = store.string(forKey: SnapshotKeys.scored)?.data(using: .utf8),
+              let savedScored = try? JSONDecoder().decode([ScoredGroup].self, from: scoredData) else {
+            clearRunSnapshots()
+            _ = machine.reset()
+            publishSnapshot()
+            notifyResultsChanged()
+            return
+        }
+
+        func decode<T: Decodable>(_ key: String, as type: T.Type) -> T? {
+            guard let text = store.string(forKey: key),
+                  let data = text.data(using: .utf8) else { return nil }
+            return try? JSONDecoder().decode(type, from: data)
+        }
+
+        guard let restoredCandidates = decode(SnapshotKeys.candidates, as: [CandidateGroup].self),
+              let restoredLowQuality = decode(SnapshotKeys.lowQuality, as: [LowQualityCandidate].self),
+              let restoredLargeMedia = decode(SnapshotKeys.largeMedia, as: [LargeMediaCandidate].self) else {
+            clearRunSnapshots()
+            _ = machine.reset()
+            publishSnapshot()
+            notifyResultsChanged()
+            return
+        }
+        let current = uniqueRecords(
+            photoLibrary.fetchAllAssets().filter { !$0.localIdentifier.isEmpty }
+        )
+        let currentByID = Dictionary(current.map { ($0.localIdentifier, $0) },
+                                     uniquingKeysWith: { first, _ in first })
+        let changed = savedAssets.count != current.count
+            || savedAssets.contains { record in
+                guard let currentRecord = currentByID[record.localIdentifier] else { return true }
+                return currentRecord != record
+            }
+        if changed {
+            clearRunSnapshots()
+            _ = machine.reset()
+            publishSnapshot()
+            notifyResultsChanged()
+            return
+        }
+
+        fetchedRecords = current
+        hashByID = database.allFeatureprintHashes(featureVersion: ScanStateMachine.featureVersion)
+        embeddingByID = database.allFeatureprintEmbeddings(featureVersion: ScanStateMachine.featureVersion)
+        scoresByID = database.allFeatureprintScores(featureVersion: ScanStateMachine.featureVersion)
+            .compactMapValues { values in
+                guard values.count == 4 else { return nil }
+                return VisionResultAggregator.aggregate(
+                    clarity: values[0], aesthetics: values[1],
+                    faceQuality: values[2], saliency: values[3]
+                )
+            }
+
+        let currentIDs = Set(current.map(\.localIdentifier))
+        let filteredScored = savedScored.compactMap { group -> ScoredGroup? in
+            guard group.members.allSatisfy({ currentIDs.contains($0.record.localIdentifier) }) else {
+                return nil
+            }
+            // scan_state 是可损坏/可被旧版本写入的外部状态；恢复时重新
+            // 应用 SafetyRules 和直接相似阈值，不能盲信持久化的预选 id。
+            let safeIDs = GroupScoring.preselectableIDs(
+                for: group.members,
+                hashByID: hashByID,
+                embeddingByID: embeddingByID
+            )
+            return ScoredGroup(
+                groupID: group.groupID,
+                reason: group.reason,
+                members: group.members,
+                preselectableIDs: safeIDs
+            )
+        }
+        let safeLowQuality = restoredLowQuality.compactMap { candidate -> LowQualityCandidate? in
+            guard currentIDs.contains(candidate.record.localIdentifier),
+                  !candidate.record.favorite, !candidate.record.isEdited else { return nil }
+            return LowQualityCandidate(
+                record: candidate.record,
+                kind: candidate.kind,
+                clarity: candidate.clarity,
+                isNightExempt: candidate.isNightExempt,
+                isOnlyInGroup: true
+            )
+        }
+        let safeLargeMedia = restoredLargeMedia.compactMap { candidate -> LargeMediaCandidate? in
+            guard currentIDs.contains(candidate.record.localIdentifier),
+                  !candidate.record.favorite, !candidate.record.isEdited else { return nil }
+            return LargeMediaCandidate(
+                record: candidate.record,
+                estimatedBytes: max(0, candidate.estimatedBytes),
+                isOnlyInGroup: true
+            )
+        }
+        snapshotLock.lock()
+        candidateGroupsSnapshot = restoredCandidates.filter {
+            $0.members.allSatisfy { currentIDs.contains($0.localIdentifier) }
+        }
+        scoredGroupsSnapshot = filteredScored
+        lowQualitySnapshot = safeLowQuality
+        largeMediaSnapshot = safeLargeMedia
+        snapshotLock.unlock()
+        notifyResultsChanged()
+    }
+
+    /// 保存完成结果，键值存储只保存 JSON，不复制图像数据。
+    private func persistSnapshotsOnQueue() {
+        let encoder = JSONEncoder()
+        snapshotLock.lock()
+        let candidates = candidateGroupsSnapshot
+        let scored = scoredGroupsSnapshot
+        let lowQuality = lowQualitySnapshot
+        let largeMedia = largeMediaSnapshot
+        let assets = fetchedRecords
+        snapshotLock.unlock()
+
+        guard let assetsData = try? encoder.encode(assets),
+              let candidatesData = try? encoder.encode(candidates),
+              let scoredData = try? encoder.encode(scored),
+              let lowQualityData = try? encoder.encode(lowQuality),
+              let largeMediaData = try? encoder.encode(largeMedia),
+              let assetsText = String(data: assetsData, encoding: .utf8),
+              let candidatesText = String(data: candidatesData, encoding: .utf8),
+              let scoredText = String(data: scoredData, encoding: .utf8),
+              let lowQualityText = String(data: lowQualityData, encoding: .utf8),
+              let largeMediaText = String(data: largeMediaData, encoding: .utf8) else { return }
+
+        store.setString(String(ScanStateMachine.featureVersion), forKey: SnapshotKeys.version)
+        store.setString(assetsText, forKey: SnapshotKeys.assets)
+        store.setString(candidatesText, forKey: SnapshotKeys.candidates)
+        store.setString(scoredText, forKey: SnapshotKeys.scored)
+        store.setString(lowQualityText, forKey: SnapshotKeys.lowQuality)
+        store.setString(largeMediaText, forKey: SnapshotKeys.largeMedia)
+        notifyResultsChanged()
+    }
+
+    /// 保存 fetching 完成时的完整资产元数据。候选结果尚未生成时也要保留这份
+    /// 基准，以便杀进程恢复时判断旧特征是否仍对应当前相册内容。
+    private func persistAssetSnapshotOnQueue() {
+        let encoder = JSONEncoder()
+        snapshotLock.lock()
+        let assets = fetchedRecords
+        snapshotLock.unlock()
+        guard let data = try? encoder.encode(assets),
+              let text = String(data: data, encoding: .utf8) else { return }
+        store.setString(String(ScanStateMachine.featureVersion), forKey: SnapshotKeys.version)
+        store.setString(text, forKey: SnapshotKeys.assets)
+    }
+
+    private func storedAssetSnapshotOnQueue() -> [AssetRecord]? {
+        guard let version = store.string(forKey: SnapshotKeys.version),
+              Int(version) == ScanStateMachine.featureVersion,
+              let text = store.string(forKey: SnapshotKeys.assets),
+              let data = text.data(using: .utf8) else { return nil }
+        return try? JSONDecoder().decode([AssetRecord].self, from: data)
+    }
+
+    private func assetSnapshotsMatch(_ lhs: [AssetRecord], _ rhs: [AssetRecord]) -> Bool {
+        guard lhs.count == rhs.count else { return false }
+        let leftByID = Dictionary(lhs.map { ($0.localIdentifier, $0) },
+                                  uniquingKeysWith: { first, _ in first })
+        let rightByID = Dictionary(rhs.map { ($0.localIdentifier, $0) },
+                                   uniquingKeysWith: { first, _ in first })
+        return leftByID == rightByID
+    }
+
+    private func clearPersistedSnapshotsOnQueue() {
+        store.setString(nil, forKey: SnapshotKeys.version)
+        store.setString(nil, forKey: SnapshotKeys.assets)
+        store.setString(nil, forKey: SnapshotKeys.candidates)
+        store.setString(nil, forKey: SnapshotKeys.scored)
+        store.setString(nil, forKey: SnapshotKeys.lowQuality)
+        store.setString(nil, forKey: SnapshotKeys.largeMedia)
     }
 
     func pause() {
@@ -307,12 +563,31 @@ final class ScanningEngine: ScanningEngineProtocol {
             machine.advance()
             publishSnapshot()
         }
-        // 杀进程续跑：中间快照随进程消失，重拉元数据并从持久化特征重建。
-        // 如果聚类/评分阶段所需的 embedding 不完整，安全地回退到 embedding 阶段重算。
+        // 杀进程续跑：中间镜像随进程消失，重拉并同步元数据，再从持久化特征重建。
+        // fetching 完成时会先写入完整 AssetRecord 快照；若当前相册元数据已经
+        // 变化，旧特征无法证明仍有效，安全回退到 hashing 阶段重算。
         if machine.phase == .hashing || machine.phase == .embedding
             || machine.phase == .clustering || machine.phase == .scoring,
            fetchedRecords.isEmpty {
-            fetchedRecords = photoLibrary.fetchAllAssets()
+            let currentRecords = uniqueRecords(
+                photoLibrary.fetchAllAssets().filter { !$0.localIdentifier.isEmpty }
+            )
+            let savedRecords = storedAssetSnapshotOnQueue()
+            let metadataChanged = savedRecords.map { !assetSnapshotsMatch($0, currentRecords) } ?? false
+
+            // 即使没有保存快照（兼容旧版本/手工断点），也要把当前全库同步进
+            // assets 表，清理已删除资产及其级联特征，避免恢复后数据库落后。
+            database.replaceAssetSnapshot(currentRecords, fetchedAt: Date())
+            fetchedRecords = currentRecords
+
+            if metadataChanged {
+                database.removeAllFeatureprints()
+                database.clearAutomaticDeleteDecisions()
+                clearRunSnapshots()
+                fetchedRecords = currentRecords
+                _ = machine.rewind(to: .hashing)
+            }
+            persistAssetSnapshotOnQueue()
         }
         hydrateForResumeOnQueue()
         guard !isDriving, machine.isActive else { return }
@@ -325,9 +600,12 @@ final class ScanningEngine: ScanningEngineProtocol {
         snapshotLock.unlock()
         if pendingLibraryChange, machine.phase == .done {
             // 当前轮次使用的是变更前的 fetchedRecords；清掉镜像，避免 UI
-            // 在下一次扫描前继续展示过期候选。持久化特征仍保留，重扫可复用。
+            // 在下一次扫描前继续展示过期候选。特征和自动裁决已经在变更回调
+            // 中失效，下一轮会从当前相册重新计算。
             pendingLibraryChange = false
             clearRunSnapshots()
+            _ = machine.reset()
+            publishSnapshot()
         }
     }
 
@@ -425,8 +703,9 @@ final class ScanningEngine: ScanningEngineProtocol {
     /// fetching：拉全库元数据 → upsert assets 表 → 逐资产汇报进度。
     /// 返回 false 表示中途响应了暂停请求（已 pause、阶段未推进）。
     private func runFetchingStage() -> Bool {
-        let assets = photoLibrary.fetchAllAssets()
-            .filter { !$0.localIdentifier.isEmpty }
+        let assets = uniqueRecords(
+            photoLibrary.fetchAllAssets().filter { !$0.localIdentifier.isEmpty }
+        )
         fetchedRecords = assets
         hashByID = [:]
         embeddingByID = [:]
@@ -450,6 +729,9 @@ final class ScanningEngine: ScanningEngineProtocol {
                 reportProgress()
             }
         }
+        // 先保存全量 AssetRecord，再推进阶段；这样在 hashing/embedding 等
+        // 后续阶段被杀时可以比较收藏、编辑、尺寸、时间、地理和 Live Photo 等字段。
+        persistAssetSnapshotOnQueue()
         machine.advance()
         publishSnapshot()
         reportProgress()
@@ -481,6 +763,7 @@ final class ScanningEngine: ScanningEngineProtocol {
                     computedAt: Date()
                 )
             }
+            throttleForThermalPressure()
             machine.setProgress(Double(index + 1) / Double(total))
             if (index + 1) % 200 == 0 || index + 1 == fetchedRecords.count {
                 publishSnapshot()
@@ -527,6 +810,7 @@ final class ScanningEngine: ScanningEngineProtocol {
                     )
                 }
             }
+            throttleForThermalPressure()
             machine.setProgress(Double(index + 1) / Double(total))
             if (index + 1) % 200 == 0 || index + 1 == pending.count {
                 publishSnapshot()
@@ -648,6 +932,7 @@ final class ScanningEngine: ScanningEngineProtocol {
                 preselectableIDs: scoredGroup.preselectableIDs.filter { !protectedIDs.contains($0) }
             ))
 
+            throttleForThermalPressure()
             machine.setProgress(Double(index + 1) / Double(total))
             publishSnapshot()
             reportProgress()
@@ -655,8 +940,9 @@ final class ScanningEngine: ScanningEngineProtocol {
 
         setScoredGroupsSnapshot(scored)
 
-        detectLowQuality()
-        detectLargeMedia()
+        guard detectLowQuality() else { return false }
+        guard detectLargeMedia() else { return false }
+        persistSnapshotsOnQueue()
 
         machine.advance()
         publishSnapshot()
@@ -670,12 +956,16 @@ final class ScanningEngine: ScanningEngineProtocol {
     /// 资产不再自动改写。
     /// 成本注记：每个未认领资产多一次缩略图读取（曝光探测）；V1 先正确后省，
     /// 大库优化属后续迭代（可与 hashing 阶段合并采样）。
-    private func detectLowQuality() {
+    private func detectLowQuality() -> Bool {
         let claimed = Set(candidateGroupsOnQueue().flatMap(\.memberIDs))
         let protectedIDs = database.assetIDs(withVerdict: .keep)
         var detected: [LowQualityCandidate] = []
 
         for record in fetchedRecords {
+            if consumePauseRequest() {
+                machine.pause(reason: "用户暂停")
+                return false
+            }
             guard !claimed.contains(record.localIdentifier),
                   record.mediaType == .image,
                   !record.favorite, !record.isEdited else { continue }
@@ -730,11 +1020,15 @@ final class ScanningEngine: ScanningEngineProtocol {
                 isNightExempt = NightWhitelist.isNightLongExposure(exif)
             }
 
-            detected.append(LowQualityCandidate(
-                record: record, kind: kind, clarity: clarity, isNightExempt: isNightExempt
-            ))
+            let candidate = LowQualityCandidate(
+                record: record, kind: kind, clarity: clarity,
+                isNightExempt: isNightExempt, isOnlyInGroup: true
+            )
+            detected.append(candidate)
 
-            if !isNightExempt {
+            // 未被相似组认领的资产没有已知替代品。它可以展示并允许用户
+            // 手动勾选，但永远不自动落 delete 裁决或进入全选建议。
+            if candidate.canPreselect {
                 database.setDecision(
                     assetId: assetId,
                     verdict: .delete,
@@ -742,17 +1036,19 @@ final class ScanningEngine: ScanningEngineProtocol {
                     decidedAt: Date()
                 )
             }
+            throttleForThermalPressure()
         }
 
         snapshotLock.lock()
         lowQualitySnapshot = detected
         snapshotLock.unlock()
+        return true
     }
 
     /// 大媒体清理 pass（T17）：估算体积 ≥ 阈值、未被相似组认领的资产
     /// （收藏/编辑过由 LargeMediaFilter 内部红线过滤）。裁决幂等口径与
     /// 低质量 pass 一致：用户 keep 不改写。估算值同步落 assets.estimated_bytes。
-    private func detectLargeMedia() {
+    private func detectLargeMedia() -> Bool {
         let claimed = Set(candidateGroupsOnQueue().flatMap(\.memberIDs))
         let candidates = LargeMediaFilter.candidates(
             from: fetchedRecords,
@@ -760,12 +1056,24 @@ final class ScanningEngine: ScanningEngineProtocol {
             idsWithKeepDecision: database.assetIDs(withVerdict: .keep)
         )
 
-        for candidate in candidates {
+        let safeCandidates = candidates.map { candidate in
+            LargeMediaCandidate(
+                record: candidate.record,
+                estimatedBytes: candidate.estimatedBytes,
+                isOnlyInGroup: true
+            )
+        }
+
+        for candidate in safeCandidates {
+            if consumePauseRequest() {
+                machine.pause(reason: "用户暂停")
+                return false
+            }
             // 未下载的 iCloud 原件只做信息展示，页面不可勾选，也不应制造
             // 一个用户无法执行的待确认删除裁决。
             guard candidate.record.locallyAvailable else { continue }
             let assetId = candidate.record.localIdentifier
-            if database.decision(assetId: assetId)?.verdict != .keep {
+            if candidate.canPreselect {
                 database.setDecision(
                     assetId: assetId,
                     verdict: .delete,
@@ -773,11 +1081,13 @@ final class ScanningEngine: ScanningEngineProtocol {
                     decidedAt: Date()
                 )
             }
+            throttleForThermalPressure()
         }
 
         snapshotLock.lock()
-        largeMediaSnapshot = candidates
+        largeMediaSnapshot = safeCandidates
         snapshotLock.unlock()
+        return true
     }
 
     /// 原子读取并清零暂停请求。返回置位前的值。
@@ -787,6 +1097,27 @@ final class ScanningEngine: ScanningEngineProtocol {
         pauseRequested = false
         snapshotLock.unlock()
         return requested
+    }
+
+    private func notifyResultsChanged() {
+        snapshotLock.lock()
+        let handler = resultsChangedHandler
+        snapshotLock.unlock()
+        guard let handler else { return }
+        DispatchQueue.main.async { handler() }
+    }
+
+    /// Vision/图像解码在高温设备上会放大卡顿与系统降频。扫描仍保持可暂停，
+    /// 这里只在系统报告 serious/critical 时让出极短时间；常温路径零额外等待。
+    private func throttleForThermalPressure() {
+        switch ProcessInfo.processInfo.thermalState {
+        case .serious:
+            Thread.sleep(forTimeInterval: 0.02)
+        case .critical:
+            Thread.sleep(forTimeInterval: 0.10)
+        default:
+            break
+        }
     }
 
     private func publishSnapshot() {
@@ -810,6 +1141,19 @@ final class ScanningEngine: ScanningEngineProtocol {
         snapshotLock.lock()
         defer { snapshotLock.unlock() }
         return candidateGroupsSnapshot
+    }
+
+    /// PhotoKit 通常保证 localIdentifier 唯一；协议假实现、迁移数据或
+    /// 受限权限边界出现重复时仍需在进入 UI/数据库前去重，避免 ForEach
+    /// 重复 id 与主键覆盖造成不确定结果。
+    private func uniqueRecords(_ records: [AssetRecord]) -> [AssetRecord] {
+        var seen = Set<String>()
+        var result: [AssetRecord] = []
+        result.reserveCapacity(records.count)
+        for record in records where seen.insert(record.localIdentifier).inserted {
+            result.append(record)
+        }
+        return result
     }
 
     private func scoredGroupsOnQueue() -> [ScoredGroup] {

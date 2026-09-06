@@ -137,11 +137,14 @@ final class VisionAnalysisService: VisionAnalysisServiceProtocol {
         imageData: Data,
         completion: @escaping (Result<String, Error>) -> Void
     ) {
-        // 实现体在 PerceptualHash（T04 的自实现 DCT pHash，纯函数核心）。
-        if let hash = PerceptualHash.hash(fromEncodedImageData: imageData) {
-            completion(.success(hash))
-        } else {
-            completion(.failure(VisionAnalysisError.imageDecodeFailed))
+        // pHash 虽然是纯函数，但包含图像解码与 DCT；保持和 analyze/
+        // embedding 一致，绝不在调用方线程（尤其是主线程）同步计算。
+        DispatchQueue.global(qos: .userInitiated).async {
+            if let hash = PerceptualHash.hash(fromEncodedImageData: imageData) {
+                completion(.success(hash))
+            } else {
+                completion(.failure(VisionAnalysisError.imageDecodeFailed))
+            }
         }
     }
 
@@ -169,16 +172,18 @@ final class VisionAnalysisService: VisionAnalysisServiceProtocol {
         imageData: Data,
         completion: @escaping (Result<[Double], Error>) -> Void
     ) {
-        do {
-            let handler = VNImageRequestHandler(data: imageData, options: [:])
-            let request = VNGenerateImageFeaturePrintRequest()
-            try handler.perform([request])
-            guard let observation = request.results?.first as? VNFeaturePrintObservation else {
-                throw VisionAnalysisError.noObservation
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                let handler = VNImageRequestHandler(data: imageData, options: [:])
+                let request = VNGenerateImageFeaturePrintRequest()
+                try handler.perform([request])
+                guard let observation = request.results?.first as? VNFeaturePrintObservation else {
+                    throw VisionAnalysisError.noObservation
+                }
+                completion(.success(try Self.extractVector(observation)))
+            } catch {
+                completion(.failure(error))
             }
-            completion(.success(try Self.extractVector(observation)))
-        } catch {
-            completion(.failure(error))
         }
     }
 

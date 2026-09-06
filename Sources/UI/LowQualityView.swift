@@ -29,7 +29,7 @@ struct LowQualityView: View {
     }
 
     private var allSuggestedIDs: Set<String> {
-        Set(actionable.map(\.record.localIdentifier))
+        Set(actionable.filter(\.canPreselect).map(\.record.localIdentifier))
     }
 
     private var allSuggestedSelected: Bool {
@@ -44,9 +44,8 @@ struct LowQualityView: View {
                     .foregroundStyle(.secondary)
                     .padding(8)
             }
-            if !allSuggestedIDs.isEmpty {
-                suggestionToggle
-            }
+            // 无安全建议时按钮置灰，仍明确提供“全选建议”入口。
+            suggestionToggle
             if actionable.isEmpty && exempted.isEmpty {
                 ContentUnavailableView(
                     "没有低质量照片",
@@ -69,6 +68,9 @@ struct LowQualityView: View {
         .onDisappear { tabBarState.isHidden = false }
         .onChange(of: scenePhase) { phase in
             if phase == .active { reload() }
+        }
+        .onChange(of: environment.libraryRevision) { _ in
+            reload()
         }
         .fullScreenCover(item: Binding(
             get: { viewerAssetID.map { SingleAssetViewerContext(id: $0) } },
@@ -93,6 +95,7 @@ struct LowQualityView: View {
         .frame(maxWidth: .infinity)
         .padding(.horizontal)
         .padding(.vertical, 4)
+        .disabled(allSuggestedIDs.isEmpty)
     }
 
     private var gridList: some View {
@@ -128,8 +131,10 @@ struct LowQualityView: View {
     private func kindSection(_ kind: LowQualityKind, title: String) -> some View {
         let rows = actionable.filter { $0.kind == kind }
         if !rows.isEmpty {
-            let ids = rows.map { $0.record.localIdentifier }
-            let allSelected = !ids.isEmpty && ids.allSatisfy { selectedIDs.contains($0) }
+            let suggestedIDs = rows.filter(\.canPreselect)
+                .map { $0.record.localIdentifier }
+            let allSelected = !suggestedIDs.isEmpty
+                && suggestedIDs.allSatisfy { selectedIDs.contains($0) }
             Section {
                 grid(rows, selectable: true)
             } header: {
@@ -138,12 +143,13 @@ struct LowQualityView: View {
                     Spacer()
                     Button(allSelected ? "取消全选" : "全选建议") {
                         if allSelected {
-                            selectedIDs.subtract(ids)
+                            selectedIDs.subtract(suggestedIDs)
                         } else {
-                            selectedIDs.formUnion(ids)
+                            selectedIDs.formUnion(suggestedIDs)
                         }
                     }
                     .font(.caption)
+                    .disabled(suggestedIDs.isEmpty)
                 }
             }
         }
@@ -268,7 +274,16 @@ struct LowQualityView: View {
     }
 
     private func confirmDeletion() {
-        let ids = selectedIDs.sorted()
+        let requested = selectedIDs.sorted()
+        let existingIDs = Set(environment.photoLibraryService.fetchAssets(matching: requested)
+            .map(\.localIdentifier))
+        let ids = requested.filter { existingIDs.contains($0) }
+        guard !ids.isEmpty else {
+            selectedIDs.removeAll()
+            statusText = "所选照片已不在相册中。"
+            reload()
+            return
+        }
         isDeleting = true
         statusText = "等待你在系统确认框中批准…"
         environment.photoLibraryService.requestDelete(of: ids) { success, error in

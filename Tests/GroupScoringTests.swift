@@ -165,6 +165,30 @@ final class GroupScoringTests: XCTestCase {
         XCTAssertEqual(none, 0)
     }
 
+    func testPreselectionRequiresDirectSimilarityToBestShot() {
+        let records = [
+            makeRecord(id: "a", seconds: 0),
+            makeRecord(id: "b", seconds: 30),
+            makeRecord(id: "c", seconds: 60),
+        ]
+        let scoredMembers = [
+            ScoredMember(record: records[0], score: 1.0, isBestShot: true),
+            ScoredMember(record: records[1], score: 0.2, isBestShot: false),
+            ScoredMember(record: records[2], score: 0.1, isBestShot: false),
+        ]
+        // A~B、B~C，但 A 与 C 距离过大：不能因为连通分量而把 C
+        // 作为可自动删除项，否则整条链可能在逐次删除后失去替代品。
+        let result = GroupScoring.preselectableIDs(
+            for: scoredMembers,
+            embeddingByID: [
+                "a": [1, 0],
+                "b": [0.98, 0.2],
+                "c": [0, 1],
+            ]
+        )
+        XCTAssertEqual(result, ["b"])
+    }
+
     // MARK: 确定性
 
     func testScoringIsDeterministic() {

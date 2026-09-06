@@ -28,7 +28,7 @@ struct LargeMediaView: View {
     }
 
     private var allSuggestedIDs: Set<String> {
-        Set(localCandidates.map(\.record.localIdentifier))
+        Set(localCandidates.filter(\.canPreselect).map(\.record.localIdentifier))
     }
 
     private var allSuggestedSelected: Bool {
@@ -55,9 +55,8 @@ struct LargeMediaView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            if !allSuggestedIDs.isEmpty {
-                suggestionToggle
-            }
+            // 无安全建议时按钮置灰，仍明确提供“全选建议”入口。
+            suggestionToggle
             summaryHeader
             if let statusText {
                 Text(statusText)
@@ -88,6 +87,9 @@ struct LargeMediaView: View {
         .onDisappear { tabBarState.isHidden = false }
         .onChange(of: scenePhase) { phase in
             if phase == .active { reload() }
+        }
+        .onChange(of: environment.libraryRevision) { _ in
+            reload()
         }
         .fullScreenCover(item: Binding(
             get: { viewerAssetID.map { SingleAssetViewerContext(id: $0) } },
@@ -128,6 +130,7 @@ struct LargeMediaView: View {
         .frame(maxWidth: .infinity)
         .padding(.horizontal)
         .padding(.vertical, 4)
+        .disabled(allSuggestedIDs.isEmpty)
     }
 
     private var mediaList: some View {
@@ -253,7 +256,16 @@ struct LargeMediaView: View {
     }
 
     private func confirmDeletion() {
-        let ids = selectedIDs.sorted()
+        let requested = selectedIDs.sorted()
+        let existingIDs = Set(environment.photoLibraryService.fetchAssets(matching: requested)
+            .map(\.localIdentifier))
+        let ids = requested.filter { existingIDs.contains($0) }
+        guard !ids.isEmpty else {
+            selectedIDs.removeAll()
+            statusText = "所选项目已不在相册中。"
+            reload()
+            return
+        }
         isDeleting = true
         statusText = "等待你在系统确认框中批准…"
         environment.photoLibraryService.requestDelete(of: ids) { success, error in

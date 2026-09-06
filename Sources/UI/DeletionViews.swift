@@ -13,6 +13,7 @@ import Photos
 /// 建议删除项可快速勾选，用户也可手动选择组内任意成员后统一进系统确认框。
 struct DeletionReviewView: View {
     /// 候选组（已过 SafetyRules；preselectableIDs 即可勾选成员）。
+    @ObservedObject var environment: AppEnvironment
     let deletionService: PhotoLibraryServiceProtocol
     let database: PhotoLibraryDatabase
     @EnvironmentObject private var tabBarState: RootTabBarState
@@ -29,10 +30,12 @@ struct DeletionReviewView: View {
 
     init(
         candidates: [ScoredGroup],
+        environment: AppEnvironment,
         deletionService: PhotoLibraryServiceProtocol,
         database: PhotoLibraryDatabase,
         onDeleted: @escaping ([String]) -> Void = { _ in }
     ) {
+        self.environment = environment
         self.deletionService = deletionService
         self.database = database
         self.onDeleted = onDeleted
@@ -76,10 +79,9 @@ struct DeletionReviewView: View {
                 groupedList
             }
 
-            // 全局一键全选所有组的建议删除（跨组操作）。
-            if !allPreselectableIDs.isEmpty {
-                suggestionToggle
-            }
+            // 全局一键全选所有组的建议删除（跨组操作）。无安全建议时仍
+            // 保留按钮并置灰，用户能明确看到当前页面支持该操作。
+            suggestionToggle
 
             NavigationLink("为什么删除的照片还能找回 30 天？") {
                 RecentlyDeletedEducationView()
@@ -91,8 +93,14 @@ struct DeletionReviewView: View {
         .toolbar(.hidden, for: .tabBar)
         .toolbarColorScheme(.dark, for: .navigationBar)
         .background(Theme.backgroundGradient.ignoresSafeArea())
-        .onAppear { tabBarState.isHidden = true }
+        .onAppear {
+            tabBarState.isHidden = true
+            reloadFromEnvironment()
+        }
         .onDisappear { tabBarState.isHidden = false }
+        .onChange(of: environment.libraryRevision) { _ in
+            reloadFromEnvironment()
+        }
         .fullScreenCover(item: $viewerContext) { context in
             GroupPhotoViewer(
                 group: context.group,
@@ -115,6 +123,7 @@ struct DeletionReviewView: View {
         .frame(maxWidth: .infinity)
         .padding(.horizontal)
         .padding(.vertical, 4)
+        .disabled(allPreselectableIDs.isEmpty)
     }
 
     private var groupedList: some View {
@@ -237,7 +246,18 @@ struct DeletionReviewView: View {
     }
 
     private func confirmDeletion() {
-        let ids = selectedIDs.sorted()
+        // 进入系统确认框前重新向 PhotoKit 校验一次，避免页面停留期间
+        // 已被外部删除/变更的旧 id 被再次提交。
+        let requested = selectedIDs.sorted()
+        let existingIDs = Set(deletionService.fetchAssets(matching: requested)
+            .map(\.localIdentifier))
+        let ids = requested.filter { existingIDs.contains($0) }
+        guard !ids.isEmpty else {
+            selectedIDs.removeAll()
+            statusText = "所选照片已不在相册中。"
+            reloadFromEnvironment()
+            return
+        }
         isDeleting = true
         statusText = "等待你在系统确认框中批准…"
         deletionService.requestDelete(of: ids) { success, error in
@@ -268,7 +288,17 @@ struct DeletionReviewView: View {
         }
     }
 
+    private func reloadFromEnvironment() {
+        let latest = environment.engine.scoredGroups
+        visibleCandidates = latest
+        let visibleIDs = Set(visibleCandidates.flatMap { group in
+            group.members.map { $0.record.localIdentifier }
+        })
+        selectedIDs.formIntersection(visibleIDs)
+    }
+
     private func removeDeletedFromVisible(_ deleted: Set<String>) {
+        let protectedIDs = database.assetIDs(withVerdict: .keep)
         visibleCandidates = visibleCandidates.compactMap { group in
             let remaining = group.members.filter { !deleted.contains($0.record.localIdentifier) }
             guard remaining.count >= 2 else { return nil }
@@ -279,11 +309,19 @@ struct DeletionReviewView: View {
                     isBestShot: index == 0
                 )
             }
+            let newBestID = rebuiltMembers.first?.record.localIdentifier
+            let remainingIDs = Set(remaining.map { $0.record.localIdentifier })
             return ScoredGroup(
                 groupID: group.groupID,
                 reason: group.reason,
                 members: rebuiltMembers,
-                preselectableIDs: GroupScoring.preselectableIDs(for: rebuiltMembers)
+                // UI 侧没有特征向量，删除后只能收窄原有建议，不能凭空
+                // 生成新建议；同时把删除后新的 Best Shot 排除在预选外。
+                preselectableIDs: group.preselectableIDs.filter {
+                    remainingIDs.contains($0)
+                        && $0 != newBestID
+                        && !protectedIDs.contains($0)
+                }
             )
         }
         let visibleIDs = Set(visibleCandidates.flatMap { group in

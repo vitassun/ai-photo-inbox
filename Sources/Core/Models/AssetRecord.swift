@@ -6,7 +6,7 @@
 import Foundation
 
 /// 媒体类型。raw value 与 PHAssetMediaType 对齐，避免纯逻辑层 import Photos。
-enum AssetMediaType: Int, Equatable {
+enum AssetMediaType: Int, Codable, Equatable {
     case unknown = 0
     case image = 1
     case video = 2
@@ -14,7 +14,7 @@ enum AssetMediaType: Int, Equatable {
 }
 
 /// 一张照片/视频在扫描时刻的快照。
-struct AssetRecord: Equatable {
+struct AssetRecord: Codable, Equatable {
     /// PHAsset.localIdentifier 原样透传；纯逻辑层只当不透明字符串用。
     let localIdentifier: String
     /// 用户是否在系统相册收藏过（红线：收藏永不预选删除，见 SafetyRules）。

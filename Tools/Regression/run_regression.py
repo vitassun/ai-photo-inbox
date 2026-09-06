@@ -34,6 +34,14 @@ def load_ground_truth(dataset: Path) -> dict[str, int]:
         group_id += 1
         for image in folder.glob("*"):
             truth[image.stem] = group_id
+
+    # 干扰样本也是负例，不能从评测数据里排除。每个干扰图视为一个
+    # 独立真实组，这样它与任意正例/其它干扰图被合并都会计入误并率。
+    distractor_folder = dataset / DISTRACTORS
+    if distractor_folder.is_dir():
+        for image in sorted(distractor_folder.glob("*")):
+            group_id += 1
+            truth[image.stem] = group_id
     return truth
 
 
@@ -43,20 +51,31 @@ def load_embeddings(path: Path) -> dict[str, list[float]]:
         for row in csv.reader(handle):
             if not row or row[0] == "asset_id":
                 continue
-            vectors[row[0]] = [float(value) for value in row[1:]]
+            try:
+                vector = [float(value) for value in row[1:]]
+            except ValueError as error:
+                raise ValueError(f"{row[0]} contains a non-numeric embedding") from error
+            if not vector or not all(value == value and abs(value) != float("inf") for value in vector):
+                raise ValueError(f"{row[0]} contains an empty or non-finite embedding")
+            if row[0] in vectors:
+                raise ValueError(f"{row[0]} appears more than once in embeddings.csv")
+            vectors[row[0]] = vector
     return vectors
 
 
 def l2_normalize(vector: list[float]) -> list[float]:
     norm = sum(v * v for v in vector) ** 0.5
-    if norm == 0:
-        return vector
+    if not norm or not norm == norm or norm == float("inf"):
+        raise ValueError("zero or non-finite embedding cannot be normalized")
     return [v / norm for v in vector]
 
 
 def cluster(assets: dict[str, list[float]], threshold: float) -> dict[str, int]:
     """union-find 连通分量（与 ios Core/Grouping/EmbeddingClusterer 同语义）。"""
     ids = sorted(assets)
+    dimensions = {len(assets[asset]) for asset in ids}
+    if len(dimensions) > 1:
+        raise ValueError(f"embedding dimensions are inconsistent: {sorted(dimensions)}")
     parent = {asset: asset for asset in ids}
 
     def find(node: str) -> str:
@@ -88,12 +107,12 @@ def evaluate(truth: dict[str, int], labels: dict[str, int]) -> tuple[float, floa
 
     total = len(labels)
     if not total:
-        return 1.0, 0.0
+        return 0.0, 1.0
 
     purity = sum(
         max(
             sum(1 for a in members if truth.get(a) == gid)
-            for gid in set(truth.get(a) for a in members)
+            for gid in set(truth[a] for a in members)
         )
         for members in by_output.values()
     ) / total
@@ -102,8 +121,8 @@ def evaluate(truth: dict[str, int], labels: dict[str, int]) -> tuple[float, floa
     ids = sorted(labels)
     for i, a in enumerate(ids):
         for b in ids[i + 1:]:
-            ta, tb = truth.get(a), truth.get(b)
-            if ta is None or tb is None or ta == tb:
+            ta, tb = truth[a], truth[b]
+            if ta == tb:
                 continue
             cross_pairs += 1
             if labels[a] == labels[b]:
@@ -113,6 +132,22 @@ def evaluate(truth: dict[str, int], labels: dict[str, int]) -> tuple[float, floa
     return purity, mis_merge
 
 
+def split_rate(truth: dict[str, int], labels: dict[str, int]) -> float:
+    """同一真实组被拆到不同输出组的资产对比例（越低越好）。"""
+    by_truth: dict[int, list[str]] = defaultdict(list)
+    for asset, group_id in truth.items():
+        if asset in labels:
+            by_truth[group_id].append(asset)
+    total_pairs = split_pairs = 0
+    for members in by_truth.values():
+        for index, asset in enumerate(members):
+            for other in members[index + 1:]:
+                total_pairs += 1
+                if labels[asset] != labels[other]:
+                    split_pairs += 1
+    return split_pairs / total_pairs if total_pairs else 0.0
+
+
 def main() -> None:
     if len(sys.argv) != 2:
         print(__doc__)
@@ -120,23 +155,31 @@ def main() -> None:
     dataset = Path(sys.argv[1])
     truth = load_ground_truth(dataset)
     embeddings = load_embeddings(dataset / "embeddings.csv")
+    missing = sorted(set(truth) - set(embeddings))
+    if missing:
+        raise ValueError(
+            f"{len(missing)} ground-truth assets have no embedding; first few: {missing[:5]}"
+        )
     assets = {
         asset: l2_normalize(vector)
         for asset, vector in embeddings.items()
         if asset in truth
     }
+    if len(assets) < 2:
+        raise ValueError("at least two labelled assets with embeddings are required")
     print(f"标注资产 {len(truth)} 个，有向量的 {len(assets)} 个")
 
-    print(f"{'阈值':>6} {'purity':>8} {'误并率':>8}  达标(purity>=0.9 且 误并<=0.10)")
+    print(f"{'阈值':>6} {'purity':>8} {'误并率':>8} {'漏拆率':>8}  达标(purity>=0.9 且 误并<=0.10)")
     qualified: list[float] = []
     for step in range(4, 21):
         threshold = step * 0.05
         labels = cluster(assets, threshold)
         purity, mis_merge = evaluate(truth, labels)
+        split = split_rate(truth, labels)
         ok = purity >= 0.9 and mis_merge <= 0.10
         if ok:
             qualified.append(threshold)
-        print(f"{threshold:>6.2f} {purity:>8.3f} {mis_merge:>8.3f}  {'✓' if ok else ''}")
+        print(f"{threshold:>6.2f} {purity:>8.3f} {mis_merge:>8.3f} {split:>8.3f}  {'✓' if ok else ''}")
 
     if qualified:
         print(f"\n达标区间：{min(qualified):.2f} ~ {max(qualified):.2f}")

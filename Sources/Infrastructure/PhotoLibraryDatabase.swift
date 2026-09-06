@@ -253,11 +253,66 @@ final class PhotoLibraryDatabase {
             }
 
             // 不使用 IN (...)，避免 5 万张相册触碰 SQLite 默认绑定参数上限。
+            // 注意：空快照也必须继续执行删除循环；否则相册被清空后，
+            // 本地索引会永久残留旧资产。
             let existingIDs = try String.fetchAll(db, sql: "SELECT local_identifier FROM assets")
             for staleID in existingIDs where !incomingIDs.contains(staleID) {
                 try db.execute(
                     sql: "DELETE FROM assets WHERE local_identifier = ?",
                     arguments: [staleID]
+                )
+            }
+        }
+    }
+
+    /// 删除指定资产的全部分析特征。相册元数据发生变化时旧特征不能复用，
+    /// 否则同一 localIdentifier 会继续使用修改前的图像结果。
+    func removeFeatureprints(assetIds: [String]) {
+        guard !assetIds.isEmpty else { return }
+        try? writer.write { db in
+            for assetId in Set(assetIds) {
+                try db.execute(
+                    sql: "DELETE FROM featureprints WHERE asset_id = ?",
+                    arguments: [assetId]
+                )
+            }
+        }
+    }
+
+    /// 清空全部分析特征。新的全量扫描在没有资产内容版本可比时调用，
+    /// 防止同一 localIdentifier 的修改内容复用旧 hash/embedding/score。
+    func removeAllFeatureprints() {
+        try? writer.write { db in
+            try db.execute(sql: "DELETE FROM featureprints")
+        }
+    }
+
+    /// 清除由算法生成、但尚未得到系统删除确认的旧建议。用户 keep、
+    /// 已确认删除和其它用户裁决均保留。
+    func clearAutomaticDeleteDecisions(assetIds: [String]? = nil) {
+        // nil 表示清空全部；显式传入空数组表示没有资产变更，必须是 no-op，
+        // 不能把一次“无 id 的变更通知”误解成全量清理。
+        if let assetIds, assetIds.isEmpty { return }
+        try? writer.write { db in
+            let automaticReason = "(reason LIKE 'low_quality:%' OR reason = 'large_media')"
+            if let assetIds, !assetIds.isEmpty {
+                for assetId in Set(assetIds) {
+                    try db.execute(
+                        sql: """
+                        DELETE FROM decisions
+                        WHERE asset_id = ? AND verdict = 'delete' AND deleted_at IS NULL
+                          AND \(automaticReason)
+                        """,
+                        arguments: [assetId]
+                    )
+                }
+            } else {
+                try db.execute(
+                    sql: """
+                    DELETE FROM decisions
+                    WHERE verdict = 'delete' AND deleted_at IS NULL
+                      AND \(automaticReason)
+                    """
                 )
             }
         }
@@ -468,6 +523,13 @@ final class PhotoLibraryDatabase {
                 db,
                 sql: "SELECT COUNT(*) FROM decisions WHERE verdict = 'delete' AND deleted_at IS NULL"
             )
+        }) ?? 0
+    }
+
+    /// 用户已经产生足够历史反馈时，评分引擎可以退出冷启动权重。
+    func decisionCount() -> Int {
+        (try? writer.read { db in
+            try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM decisions")
         }) ?? 0
     }
 

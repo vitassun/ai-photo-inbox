@@ -10,7 +10,7 @@
 import Foundation
 
 /// 一个组内成员的评分产物。
-struct ScoredMember: Equatable {
+struct ScoredMember: Codable, Equatable {
     let record: AssetRecord
     /// 保留分 [0,1]（KeepScore 输出）。
     let score: Double
@@ -19,7 +19,7 @@ struct ScoredMember: Equatable {
 }
 
 /// 评分后的候选组：排序视图 + 预删除候选 id 集。
-struct ScoredGroup: Equatable {
+struct ScoredGroup: Codable, Equatable {
     let groupID: String
     let reason: String
     /// 组内成员按保留分降序（Best Shot 在首；同分按时间新→旧）。
@@ -83,7 +83,11 @@ enum GroupScoring {
             isBestShot: true
         )
 
-        let preselectable = preselectableIDs(for: flagged)
+        let preselectable = preselectableIDs(
+            for: flagged,
+            hashByID: hashByID,
+            embeddingByID: embeddingByID
+        )
 
         return ScoredGroup(
             groupID: group.id,
@@ -96,6 +100,16 @@ enum GroupScoring {
     /// 根据已按保留分排序的成员重建预删除集合。
     /// 删除后刷新内存视图时复用这条规则，避免旧候选 id 残留或绕过 70% 上限。
     static func preselectableIDs(for members: [ScoredMember]) -> [String] {
+        preselectableIDs(for: members, hashByID: [:], embeddingByID: [:])
+    }
+
+    /// 带特征的预选计算。聚类使用传递闭包，但删除后必须仍有一个与被删项
+    /// 直接相似且确定保留的成员；否则链式相似 A~B~C 可能把整条链删空。
+    static func preselectableIDs(
+        for members: [ScoredMember],
+        hashByID: [String: String],
+        embeddingByID: [String: [Double]]
+    ) -> [String] {
         guard !members.isEmpty else { return [] }
         let group = CandidateGroup(
             id: "preselect",
@@ -110,6 +124,21 @@ enum GroupScoring {
         let eligible = members.compactMap { member -> String? in
             guard member.record.localIdentifier != bestID,
                   allowedIDs.contains(member.record.localIdentifier) else { return nil }
+            // 如果没有任何特征可用于直接验证，保留原有组语义；这主要服务
+            // 旧数据/纯逻辑测试。真实扫描的组至少有 pHash 或 embedding。
+            let hasComparableFeature = members.contains { member in
+                hashByID[member.record.localIdentifier] != nil
+                    || embeddingByID[member.record.localIdentifier] != nil
+            }
+            if hasComparableFeature {
+                let best = members.first { $0.record.localIdentifier == bestID }
+                guard let best,
+                      directlySimilar(member.record, best.record,
+                                      hashByID: hashByID,
+                                      embeddingByID: embeddingByID) else {
+                    return nil
+                }
+            }
             return member.record.localIdentifier
         }
         let maxCount = Int(floor(Double(members.count) * AppConfig.maxPreselectedDeletionRatio))
@@ -159,5 +188,26 @@ enum GroupScoring {
             return max(0, min(1, 1 - Double(distance) / totalBits))
         }
         return nil
+    }
+
+    /// 与候选组建立关系的直接阈值检查。仅判断“能算出相似度”会把
+    /// A~B~C 的传递闭包误当作 A 与 C 也可互相替代，导致整条链被自动删空。
+    private static func directlySimilar(
+        _ a: AssetRecord,
+        _ b: AssetRecord,
+        hashByID: [String: String],
+        embeddingByID: [String: [Double]]
+    ) -> Bool {
+        if let va = embeddingByID[a.localIdentifier],
+           let vb = embeddingByID[b.localIdentifier],
+           let distance = EmbeddingMath.euclidean(va, vb) {
+            return distance <= AppConfig.embeddingClusterDistanceThreshold
+        }
+        if let ha = hashByID[a.localIdentifier],
+           let hb = hashByID[b.localIdentifier],
+           let distance = HashDistance.hamming(hexA: ha, hexB: hb) {
+            return distance <= AppConfig.pHashDuplicateHammingDistance
+        }
+        return false
     }
 }

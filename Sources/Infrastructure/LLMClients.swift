@@ -79,7 +79,10 @@ final class RemoteLLMClient: LLMClientProtocol {
                 return data
             } catch {
                 lastError = error
-                if error is CancellationError { throw error }
+                if error is CancellationError
+                    || (error as? URLError)?.code == .cancelled {
+                    throw CancellationError()
+                }
                 // 只重试瞬时故障；鉴权、参数和服务端业务错误重试没有意义。
                 if let llmError = error as? LLMError,
                    !Self.isRetryable(llmError) {

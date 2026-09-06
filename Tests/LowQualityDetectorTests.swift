@@ -41,13 +41,37 @@ final class LowQualityDetectorTests: XCTestCase {
         XCTAssertEqual(LowQualityDetector.detect(clarity: 0.05, overRatio: 0, underRatio: 0.55), .underexposed)
     }
 
+    func testDetectOverExposureDominatesBlurWithoutUnderExposure() {
+        // 回归：旧 switch 漏掉 (blurry, over, !under)，会错误落回 blurry。
+        XCTAssertEqual(
+            LowQualityDetector.detect(clarity: 0.05, overRatio: 0.6, underRatio: 0),
+            .overexposed
+        )
+    }
+
+    func testDetectClearImageWithBothExposureSignalsUsesTheLargerRatio() {
+        XCTAssertEqual(
+            LowQualityDetector.detect(clarity: 0.8, overRatio: 0.31, underRatio: 0.7),
+            .underexposed
+        )
+        XCTAssertEqual(
+            LowQualityDetector.detect(clarity: 0.8, overRatio: 0.8, underRatio: 0.31),
+            .overexposed
+        )
+    }
+
     func testMalformedFloatInputsDoNotCreateExposureCandidates() {
         XCTAssertNil(LowQualityDetector.detect(clarity: .nan, overRatio: .infinity, underRatio: .nan))
         XCTAssertEqual(LowQualityDetector.detect(clarity: 0.05, overRatio: .nan, underRatio: .infinity), .blurry)
     }
 
     func testPreselectableRedLines() {
-        func candidate(favorite: Bool = false, edited: Bool = false, exempt: Bool = false) -> LowQualityCandidate {
+        func candidate(
+            favorite: Bool = false,
+            edited: Bool = false,
+            exempt: Bool = false,
+            onlyAssetWithoutAlternative: Bool = false
+        ) -> LowQualityCandidate {
             LowQualityCandidate(
                 record: AssetRecord(
                     localIdentifier: "x", favorite: favorite, isEdited: edited,
@@ -55,13 +79,18 @@ final class LowQualityDetectorTests: XCTestCase {
                     creationDate: nil, isScreenshot: false, isLivePhoto: false,
                     latitude: nil, longitude: nil
                 ),
-                kind: .blurry, clarity: 0.05, isNightExempt: exempt
+                kind: .blurry, clarity: 0.05, isNightExempt: exempt,
+                isOnlyInGroup: onlyAssetWithoutAlternative
             )
         }
         XCTAssertTrue(LowQualityDetector.preselectable(candidate()))
         XCTAssertFalse(LowQualityDetector.preselectable(candidate(favorite: true)), "红线：收藏永不预选")
         XCTAssertFalse(LowQualityDetector.preselectable(candidate(edited: true)), "红线：编辑过永不预选")
         XCTAssertFalse(LowQualityDetector.preselectable(candidate(exempt: true)), "红线 6：夜间豁免永不预选")
+        XCTAssertFalse(
+            LowQualityDetector.preselectable(candidate(onlyAssetWithoutAlternative: true)),
+            "红线：没有相似替代品的资产永不预选"
+        )
     }
 
     // MARK: 曝光占比 DSP
@@ -189,10 +218,11 @@ final class LowQualityDetectorTests: XCTestCase {
         XCTAssertEqual(snapshot.first { $0.record.localIdentifier == "blurry" }?.kind, .blurry)
         XCTAssertEqual(snapshot.first { $0.record.localIdentifier == "blurry-night" }?.isNightExempt, true)
 
-        // 裁决落库：非豁免项落 low_quality:*；豁免项与清晰片零裁决。
-        XCTAssertEqual(database.decision(assetId: "blurry")?.verdict, .delete)
-        XCTAssertTrue(database.decision(assetId: "blurry")!.reason.hasPrefix("low_quality:blurry"))
-        XCTAssertEqual(database.decision(assetId: "over")?.reason, "low_quality:overexposed")
+        // 三张都是未被相似组认领的单独资产，没有已知替代品：只展示，
+        // 不写入自动删除裁决，也不会被“全选建议”带入确认框。
+        XCTAssertTrue(snapshot.allSatisfy { !$0.canPreselect })
+        XCTAssertNil(database.decision(assetId: "blurry"))
+        XCTAssertNil(database.decision(assetId: "over"))
         XCTAssertNil(database.decision(assetId: "blurry-night"), "红线 6：豁免项不得落删除裁决")
         XCTAssertNil(database.decision(assetId: "sharp"))
         XCTAssertNil(database.decision(assetId: "fav-blurry"))
@@ -235,7 +265,7 @@ final class LowQualityDetectorTests: XCTestCase {
         let overridden = database.decision(assetId: "override-me")
         XCTAssertEqual(overridden?.verdict, .keep, "user_override 不得被自动裁决覆盖")
         XCTAssertEqual(overridden?.reason, "user_override")
-        XCTAssertEqual(database.decision(assetId: "plain-blur")?.verdict, .delete)
+        XCTAssertNil(database.decision(assetId: "plain-blur"), "无相似替代品的低质量资产不得自动落删除裁决")
     }
 
     func testRemoveLowQualityCandidatesUpdatesMirror() {

@@ -29,14 +29,14 @@ jobs:
 
       - name: Assert Core layer never imports Photos (T02 red line)
         run: |
-          # 只匹配行首真正的 import 语句——Core 层注释里含"import Photos"字样属正当文档，不许误伤。
+          # 只匹配行首真正的系统框架 import；注释里的文字不计入。
           # 显式区分退出码：0=违规；2+=目录缺失等检查自身故障也按失败处理（fail-closed，
           # 防止路径变动后红线检查在全绿掩护下静默失效）。注意步骤默认 bash -eo pipefail，
           # 裸 grep 的 rc=1（干净）会触发 errexit，故用 || 接住退出码。
           rc=0
-          grep -rnE '^[[:space:]]*import[[:space:]]+Photos[[:space:]]*$' Sources/Core/ || rc=$?
+          grep -rnE '^[[:space:]]*import[[:space:]]+(Photos|Vision|UIKit)[[:space:]]*$' Sources/Core/ || rc=$?
           if [ "$rc" -eq 0 ]; then
-            echo "::error::Sources/Core/ 出现 import Photos，违反架构红线"
+            echo "::error::Sources/Core/ 出现 Photos/Vision/UIKit import，违反架构红线"
             exit 1
           elif [ "$rc" -ge 2 ]; then
             echo "::error::红线检查自身失败（grep rc=$rc），按违规处理"
@@ -52,6 +52,19 @@ jobs:
             exit 1
           }
           echo "launch-time red-line check wired"
+
+      - name: Assert deletion has one PhotoKit confirmation path (T10)
+        run: |
+          # 只匹配真正的调用行；协议和文档可以描述该契约，
+          # 其它 Swift 实现若出现调用就按红线失败。
+          violations=$(grep -RIn --include='*.swift' -E '^[[:space:]]*PHAssetChangeRequest\.deleteAssets' Sources \
+            | grep -v '^Sources/Infrastructure/SystemPhotoLibraryService\.swift:' || true)
+          if [ -n "$violations" ]; then
+            echo "::error::发现绕过 SystemPhotoLibraryService 的删除调用"
+            echo "$violations"
+            exit 1
+          fi
+          echo "single PhotoKit deletion path verified"
 
       - name: List available simulators (debug aid)
         run: xcrun simctl list devices available | head -n 30
@@ -93,6 +106,7 @@ jobs:
   # 免签名设备构建：产出 Payload zip（下载后改名 .ipa 喂 Sideloadly）。
   # 免费签名路线不需要开发者账号；签名动作在用户本机的 Sideloadly 完成。
   device-build:
+    needs: test
     # 与测试任务保持同一套 Xcode 26 工具链，产出的 IPA 才包含原生 Liquid Glass。
     runs-on: macos-26
     steps:

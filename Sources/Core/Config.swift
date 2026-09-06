@@ -97,6 +97,10 @@ enum AppConfig {
     static let lowQualityOverExposedRatioThreshold = 0.30
     static let lowQualityUnderExposedRatioThreshold = 0.30
 
+    /// 模糊与曝光异常同时命中时，达到此占比才让过曝标签压过模糊标签。
+    /// 低于该值仍保留模糊/欠曝的保守分类，避免单个亮斑主导结果。
+    static let lowQualityExposureDominanceRatio = 0.50
+
     // MARK: 安全预选
 
     /// 相似组最多允许自动预选的删除比例。向下取整，且 Best Shot 永不计入。

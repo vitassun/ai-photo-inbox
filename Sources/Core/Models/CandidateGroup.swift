@@ -6,7 +6,7 @@
 import Foundation
 
 /// 一组互为相似候选的资产。
-struct CandidateGroup: Equatable {
+struct CandidateGroup: Codable, Equatable {
     /// 组标识（V1 可用 "timebucket-<起始时间戳>" 之类的确定性字符串）。
     let id: String
     /// 组内成员完整记录，顺序即时间先后（旧 → 新）。

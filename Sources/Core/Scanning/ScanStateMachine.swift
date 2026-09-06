@@ -8,7 +8,9 @@ import Foundation
 final class ScanStateMachine {
     /// 特征/持久化格式版本。字段语义变更时 +1；
     /// 恢复时版本不符则丢弃旧进度从头重扫（避免脏数据混入新逻辑）。
-    static let featureVersion = 1
+    // 预选安全语义、结果快照格式和特征复用边界发生过变化；提高版本后，
+    // 旧进度/特征会在下次启动时安全回到 idle，避免混用旧算法产物。
+    static let featureVersion = 2
 
     /// 流水线固定顺序（与 ScanPhase 注释保持一致）。
     static let pipeline: [ScanPhase] = [

@@ -100,8 +100,10 @@ final class LargeMediaWiringTests: XCTestCase {
         XCTAssertEqual(ids.first, "vid-4k")
         XCTAssertEqual(ids, ["vid-4k", "icloud-vid"])
 
-        // 裁决：非 keep 候选落 large_media；用户保留不被改写；小图零裁决。
-        XCTAssertEqual(database.decision(assetId: "vid-4k")?.reason, "large_media")
+        // 未被相似组认领的大媒体没有已知替代品：只展示，不能被全选建议
+        // 自动带入删除裁决；用户仍可手动选择后走系统确认框。
+        XCTAssertFalse(snapshot.first { $0.record.localIdentifier == "vid-4k" }!.canPreselect)
+        XCTAssertNil(database.decision(assetId: "vid-4k"))
         XCTAssertNil(database.decision(assetId: "icloud-vid"), "未下载项目不可操作，不应进入待确认裁决")
         let overridden = database.decision(assetId: "override-vid")
         XCTAssertEqual(overridden?.verdict, .keep)

@@ -21,6 +21,10 @@ final class PhotoLibraryChangeMonitor: NSObject, PHPhotoLibraryChangeObserver {
 
     private let stateQueue = DispatchQueue(label: "com.aiphotoinbox.PhotoLibraryChangeMonitor.state")
 
+    deinit {
+        stop()
+    }
+
     func start() {
         stateQueue.sync {
             guard observedResult == nil else { return }
@@ -48,13 +52,30 @@ final class PhotoLibraryChangeMonitor: NSObject, PHPhotoLibraryChangeObserver {
             guard let result = observedResult,
                   let details = changeInstance.changeDetails(for: result) else { return nil }
 
-            let inserted = details.insertedObjects.map(\.localIdentifier)
-            let removed = details.removedObjects.map(\.localIdentifier)
-            // changedObjects 与 removedObjects 理论上互斥；防御性再排除一次已删除者。
-            let removedSet = Set(removed)
-            let updated = details.changedObjects
-                .map(\.localIdentifier)
-                .filter { !removedSet.contains($0) }
+            let inserted: [String]
+            let removed: [String]
+            let updated: [String]
+
+            if details.hasIncrementalChanges {
+                inserted = details.insertedObjects.map(\.localIdentifier).sorted()
+                removed = details.removedObjects.map(\.localIdentifier).sorted()
+                // changedObjects 与 removedObjects 理论上互斥；防御性再排除一次已删除者。
+                let removedSet = Set(removed)
+                updated = details.changedObjects
+                    .map(\.localIdentifier)
+                    .filter { !removedSet.contains($0) }
+                    .sorted()
+            } else {
+                // 大规模重排/批量导入时 PhotoKit 明确表示增量字段没有意义。
+                // 这时把新旧快照做集合差，并将交集全部标为 updated，
+                // 让上层重新读取收藏、编辑和可用性等元数据。
+                let before = Set(self.localIdentifiers(in: result))
+                let afterResult = details.fetchResultAfterChanges
+                let after = Set(self.localIdentifiers(in: afterResult))
+                inserted = Array(after.subtracting(before)).sorted()
+                removed = Array(before.subtracting(after)).sorted()
+                updated = Array(before.intersection(after)).sorted()
+            }
 
             // 以变更后的结果作为下一轮 diff 基准。
             observedResult = details.fetchResultAfterChanges
@@ -70,5 +91,16 @@ final class PhotoLibraryChangeMonitor: NSObject, PHPhotoLibraryChangeObserver {
         Task { @MainActor [weak self] in
             self?.delegate?.photoLibraryDidChange(event)
         }
+    }
+
+    /// PHFetchResult.objects(at:) 在部分 SDK 版本只对 NSArray 暴露，
+    /// enumerateObjects 是跨 iOS 18+ SDK 更稳定的公共 API。
+    private func localIdentifiers(in result: PHFetchResult<PHAsset>) -> [String] {
+        var identifiers: [String] = []
+        identifiers.reserveCapacity(result.count)
+        result.enumerateObjects { asset, _, _ in
+            identifiers.append(asset.localIdentifier)
+        }
+        return identifiers
     }
 }

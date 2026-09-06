@@ -7,9 +7,16 @@
 import Foundation
 
 /// 一个大媒体清理候选项。
-struct LargeMediaCandidate: Equatable {
+struct LargeMediaCandidate: Codable, Equatable {
     let record: AssetRecord
     let estimatedBytes: Int64
+    /// 未被相似组认领的大媒体没有已知替代品，只能展示，不能被全选建议预选。
+    /// 默认值保持旧的纯逻辑构造调用兼容；真实扫描时由引擎显式置位。
+    let isOnlyInGroup: Bool = false
+
+    var canPreselect: Bool {
+        !isOnlyInGroup && !record.favorite && !record.isEdited && record.locallyAvailable
+    }
 }
 
 enum LargeMediaFilter {
@@ -32,7 +39,9 @@ enum LargeMediaFilter {
             guard !idsInCandidateGroups.contains(record.localIdentifier) else { return nil }
             guard let bytes = MediaSizeEstimator.estimatedBytes(for: record),
                   bytes >= thresholdBytes else { return nil }
-            return LargeMediaCandidate(record: record, estimatedBytes: bytes)
+            // 该过滤器接收的是“未被相似组认领”的资产，因此没有已知替代品；
+            // 结果只用于展示和用户手动选择，不能成为全选建议。
+            return LargeMediaCandidate(record: record, estimatedBytes: bytes, isOnlyInGroup: true)
         }
         .sorted { $0.estimatedBytes > $1.estimatedBytes }
     }

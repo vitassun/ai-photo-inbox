@@ -128,8 +128,10 @@ final class PhotoLibraryServiceTests: XCTestCase {
         let records = SystemPhotoLibraryService.assetRecords(from: [
             makeSnapshot(id: ""),
             makeSnapshot(id: "asset-ok"),
+            makeSnapshot(id: "asset-ok", favorite: true),
         ])
         XCTAssertEqual(records.map(\.localIdentifier), ["asset-ok"])
+        XCTAssertEqual(records.first?.favorite, false, "重复 localIdentifier 保留首次快照，避免 UI/数据库出现重复行")
     }
 
     // MARK: fetchAssets(matching:) 契约（验收：未知 localIdentifier 忽略不崩）

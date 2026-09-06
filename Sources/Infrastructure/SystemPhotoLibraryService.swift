@@ -111,7 +111,13 @@ extension PHAssetSnapshot {
         let resources = PHAssetResource.assetResources(for: asset)
         guard !resources.isEmpty else { return true }
         return resources.allSatisfy { resource in
-            (resource.value(forKey: "locallyAvailable") as? Bool) ?? true
+            // `locallyAvailable` is not a documented PHAssetResource property on
+            // every iOS release. Check the getter before using KVC so an older
+            // runtime cannot raise NSUndefinedKeyException. Unknown resources
+            // are treated as available: hiding a deletable item is worse than
+            // showing it with an estimate that the user can verify.
+            guard resource.responds(to: Selector(("locallyAvailable"))) else { return true }
+            return (resource.value(forKey: "locallyAvailable") as? Bool) ?? true
         }
     }
 }
@@ -147,7 +153,11 @@ final class SystemPhotoLibraryService: PhotoLibraryServiceProtocol {
         of identifiers: [String],
         completion: @escaping (Bool, Error?) -> Void
     ) {
-        guard !identifiers.isEmpty else {
+        var seen = Set<String>()
+        let normalizedIdentifiers = identifiers.filter { id in
+            !id.isEmpty && seen.insert(id).inserted
+        }
+        guard !normalizedIdentifiers.isEmpty else {
             DispatchQueue.main.async { completion(true, nil) }
             return
         }
@@ -156,7 +166,7 @@ final class SystemPhotoLibraryService: PhotoLibraryServiceProtocol {
         // 即停止后续批次——续传语义：调用方以 fetchAssets(matching:) 重查
         // 幸存者后重试，已删者自然消失。
         DispatchQueue.global(qos: .userInitiated).async {
-            let error = DeletionFlow.runBatches(identifiers) { batch, _ in
+            let error = DeletionFlow.runBatches(normalizedIdentifiers) { batch, _ in
                 let semaphore = DispatchSemaphore(value: 0)
                 var batchError: Error?
 
@@ -204,7 +214,15 @@ final class SystemPhotoLibraryService: PhotoLibraryServiceProtocol {
 
     /// 纯函数：全量映射（剔除无 id 资产）。
     static func assetRecords(from snapshots: [PHAssetSnapshot]) -> [AssetRecord] {
-        snapshots.compactMap { $0.makeAssetRecord() }
+        var seen = Set<String>()
+        var records: [AssetRecord] = []
+        records.reserveCapacity(snapshots.count)
+        for snapshot in snapshots {
+            guard let record = snapshot.makeAssetRecord(),
+                  seen.insert(record.localIdentifier).inserted else { continue }
+            records.append(record)
+        }
+        return records
     }
 
     /// 纯函数：按请求 id 过滤并映射。调用方契约：未知 id 忽略不崩；
