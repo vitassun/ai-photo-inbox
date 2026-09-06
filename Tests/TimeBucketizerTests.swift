@@ -96,4 +96,21 @@ final class TimeBucketizerTests: XCTestCase {
         XCTAssertEqual(same, [["a", "b"]])
         XCTAssertEqual(split, [["a"], ["b"]])
     }
+
+    func testOversizedBucketUsesOverlappingWindows() {
+        let entries = (0..<5).map {
+            ("asset-\($0)", date(offsetSeconds: TimeInterval($0 * 10)))
+        }
+        let result = TimeBucketizer.bucketize(
+            entries,
+            gapThreshold: 1800,
+            maxSpan: 1800,
+            maxBucketSize: 3,
+            overlap: 1
+        )
+        XCTAssertEqual(result, [
+            ["asset-0", "asset-1", "asset-2"],
+            ["asset-2", "asset-3", "asset-4"],
+        ])
+    }
 }

@@ -30,9 +30,13 @@ enum CandidateGrouper {
         hashByID: [String: String]
     ) -> [CandidateGroup] {
         var groups: [CandidateGroup] = []
+        var seenMemberSets: Set<String> = []
         for unit in timeGeoUnits(from: records) {
             for component in hammingComponents(unit.members, hashByID: hashByID)
             where component.count >= 2 {
+                let memberIDs = component.map(\.localIdentifier)
+                let signature = memberIDs.sorted().joined(separator: "\u{1F}")
+                guard seenMemberSets.insert(signature).inserted else { continue }
                 groups.append(
                     CandidateGroup(
                         id: "cand-\(unit.bucketIndex)-\(component[0].localIdentifier)",

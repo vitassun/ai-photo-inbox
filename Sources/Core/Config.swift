@@ -17,6 +17,12 @@ enum AppConfig {
     /// 来源：tech-spec §3 / TimeBucketizer 默认值冻结；调参入口：corpus 回归集。
     static let timeGapThreshold: TimeInterval = 1800
 
+    /// 单个比较桶的最大时间跨度与容量。超过上限时按重叠窗口切分，
+    /// 防止连续拍摄把两两比较退化成平方级；重叠项保留边界召回。
+    static let timeBucketMaxSpan: TimeInterval = 1800
+    static let timeBucketMaxSize = 250
+    static let timeBucketOverlap = 16
+
     /// 地理簇半径（米）：同场景拍摄点的经验粒度（GPS 误差 + 手抖范围量级）。
     /// 来源：可行性报告 §2.1；调参入口：真实相册标注回归集。
     static let geoClusterRadiusMeters: Double = 300

@@ -18,7 +18,10 @@ enum TimeBucketizer {
     ///   空输入返回空数组。
     static func bucketize(
         _ entries: [(id: String, date: Date)],
-        gapThreshold: TimeInterval = 1800
+        gapThreshold: TimeInterval = 1800,
+        maxSpan: TimeInterval = AppConfig.timeBucketMaxSpan,
+        maxBucketSize: Int = AppConfig.timeBucketMaxSize,
+        overlap: Int = AppConfig.timeBucketOverlap
     ) -> [[String]] {
         guard !entries.isEmpty else { return [] }
 
@@ -32,20 +35,48 @@ enum TimeBucketizer {
             // 无效阈值不能把整库错误合并进一个桶；保守地逐项隔离。
             return sorted.map { [$0.id] }
         }
-        var buckets: [[String]] = []
-        var currentBucket: [String] = [sorted[0].id]
+        var baseBuckets: [[(id: String, date: Date)]] = []
+        var currentBucket: [(id: String, date: Date)] = [sorted[0]]
         var previousDate = sorted[0].date
 
         for entry in sorted.dropFirst() {
             if entry.date.timeIntervalSince(previousDate) > gapThreshold {
-                buckets.append(currentBucket)
-                currentBucket = [entry.id]
+                baseBuckets.append(currentBucket)
+                currentBucket = [entry]
             } else {
-                currentBucket.append(entry.id)
+                currentBucket.append(entry)
             }
             previousDate = entry.date
         }
-        buckets.append(currentBucket)
+        baseBuckets.append(currentBucket)
+
+        let validSpan = maxSpan.isFinite && maxSpan >= 0
+            ? maxSpan
+            : TimeInterval.greatestFiniteMagnitude
+        let validSize = maxBucketSize > 0 ? maxBucketSize : Int.max
+        let validOverlap = max(0, overlap)
+        var buckets: [[String]] = []
+        for baseBucket in baseBuckets {
+            guard baseBucket.count > validSize
+                    || baseBucket.last!.date.timeIntervalSince(baseBucket.first!.date) > validSpan else {
+                buckets.append(baseBucket.map(\.id))
+                continue
+            }
+
+            var start = 0
+            while start < baseBucket.count {
+                var end = start + 1
+                while end < baseBucket.count,
+                      end - start < validSize,
+                      baseBucket[end].date.timeIntervalSince(baseBucket[start].date) <= validSpan {
+                    end += 1
+                }
+                buckets.append(baseBucket[start..<end].map(\.id))
+                guard end < baseBucket.count else { break }
+                let retained = min(validOverlap, end - start - 1)
+                start = end - retained
+            }
+        }
         return buckets
     }
 }

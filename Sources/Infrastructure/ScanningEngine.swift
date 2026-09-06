@@ -141,6 +141,12 @@ final class ScanningEngine: ScanningEngineProtocol {
     private let assetExifReader: ((String) -> [String: Any]?)?
     /// 低质量检测注入（T16）：编码图像数据 → 曝光直方图占比（过曝/欠曝）。
     private let exposureProbe: (Data) -> (over: Double, under: Double)?
+    /// 有限容量的缩略图缓存：hash/embedding/评分/质量检测尽量复用同一份
+    /// 输入，同时避免把整库原图长期留在内存。
+    private var imageDataCache: [String: Data] = [:]
+    private var imageDataCacheOrder: [String] = []
+    private var imageDataCacheBytes = 0
+    private let maxImageDataCacheBytes = 32 * 1024 * 1024
     /// 冷启动开关（V1 无反馈历史恒 false → favoriteBoost 翻倍；反馈历史属 T14 后）。
     private let hasUserData: Bool
 
@@ -248,6 +254,7 @@ final class ScanningEngine: ScanningEngineProtocol {
                 self.hashByID[id] = nil
                 self.embeddingByID[id] = nil
                 self.scoresByID[id] = nil
+                self.removeCachedImageOnQueue(id)
             }
             let oldCandidateGroups = self.candidateGroupsOnQueue()
             let oldScoredGroups = self.scoredGroupsOnQueue()
@@ -456,6 +463,9 @@ final class ScanningEngine: ScanningEngineProtocol {
         hashByID = [:]
         embeddingByID = [:]
         scoresByID = [:]
+        imageDataCache.removeAll(keepingCapacity: true)
+        imageDataCacheOrder.removeAll(keepingCapacity: true)
+        imageDataCacheBytes = 0
         keepDecisionIDsForRun = nil
         snapshotLock.lock()
         candidateGroupsSnapshot = []
@@ -1040,7 +1050,7 @@ final class ScanningEngine: ScanningEngineProtocol {
                 return false
             }
             if hashByID[record.localIdentifier] == nil,
-               let data = imageDataLoader(record.localIdentifier),
+               let data = imageDataOnQueue(record.localIdentifier),
                let hash = hashComputer(data) {
                 hashByID[record.localIdentifier] = hash
                 pendingWrites.append(FeatureprintWrite(
@@ -1113,7 +1123,7 @@ final class ScanningEngine: ScanningEngineProtocol {
                 return false
             }
             if embeddingByID[record.localIdentifier] == nil,
-               let data = imageDataLoader(record.localIdentifier),
+               let data = imageDataOnQueue(record.localIdentifier),
                let rawVector = embeddingComputer(data) {
                 let vector = EmbeddingMath.normalized(rawVector)
                 if EmbeddingMath.isUsable(vector) {
@@ -1239,7 +1249,7 @@ final class ScanningEngine: ScanningEngineProtocol {
 
             // 缺分数的成员补算（经注入的分析器；失败回退中性值由聚合层保证）。
             for member in group.members where scoresByID[member.localIdentifier] == nil {
-                guard let data = imageDataLoader(member.localIdentifier),
+                guard let data = imageDataOnQueue(member.localIdentifier),
                       let features = featureAnalyzer(data) else { continue }
                 let sanitized = VisionResultAggregator.aggregate(
                     clarity: features.clarity,
@@ -1329,7 +1339,7 @@ final class ScanningEngine: ScanningEngineProtocol {
             let assetId = record.localIdentifier
             // 用户明确保留/移出候选的资产在后续重扫中也不应被自动加回。
             guard !protectedIDs.contains(assetId) else { continue }
-            let imageData = imageDataLoader(assetId)
+            let imageData = imageDataOnQueue(assetId)
 
             // 特征补算（与 scoring 阶段同一信封格式落表，续扫复用）。
             if scoresByID[assetId] == nil,
@@ -1519,6 +1529,34 @@ final class ScanningEngine: ScanningEngineProtocol {
         Thread.sleep(forTimeInterval: 0.001)
     }
 
+    private func imageDataOnQueue(_ assetID: String) -> Data? {
+        guard !assetID.isEmpty else { return nil }
+        if let cached = imageDataCache[assetID] {
+            imageDataCacheOrder.removeAll { $0 == assetID }
+            imageDataCacheOrder.append(assetID)
+            return cached
+        }
+        guard let data = imageDataLoader(assetID) else { return nil }
+        guard data.count <= maxImageDataCacheBytes else { return data }
+        while imageDataCacheBytes + data.count > maxImageDataCacheBytes,
+              let evictedID = imageDataCacheOrder.first {
+            imageDataCacheOrder.removeFirst()
+            if let evicted = imageDataCache.removeValue(forKey: evictedID) {
+                imageDataCacheBytes -= evicted.count
+            }
+        }
+        imageDataCache[assetID] = data
+        imageDataCacheOrder.append(assetID)
+        imageDataCacheBytes += data.count
+        return data
+    }
+
+    private func removeCachedImageOnQueue(_ assetID: String) {
+        guard let removed = imageDataCache.removeValue(forKey: assetID) else { return }
+        imageDataCacheBytes = max(0, imageDataCacheBytes - removed.count)
+        imageDataCacheOrder.removeAll { $0 == assetID }
+    }
+
     private func flushFeatureprintWritesOnQueue(
         _ writes: inout [FeatureprintWrite],
         failureMessage: String
@@ -1579,6 +1617,7 @@ final class ScanningEngine: ScanningEngineProtocol {
             hashByID[id] = nil
             embeddingByID[id] = nil
             scoresByID[id] = nil
+            removeCachedImageOnQueue(id)
         }
 
         snapshotLock.lock()
