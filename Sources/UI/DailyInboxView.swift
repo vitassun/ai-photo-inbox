@@ -222,7 +222,7 @@ struct DailyInboxView: View {
                 }
 
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(environment.engine.state == .paused
+                    Text(isScanPaused
                          ? "继续扫描"
                          : "开始扫描")
                         .font(.subheadline.bold())
@@ -247,6 +247,13 @@ struct DailyInboxView: View {
         }
         .buttonStyle(.plain)
         .disabled(isScanning)
+    }
+
+    private var isScanPaused: Bool {
+        if case .paused = environment.engine.state {
+            return true
+        }
+        return false
     }
 
     private var scanStatusView: some View {
