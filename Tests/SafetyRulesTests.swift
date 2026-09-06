@@ -72,6 +72,19 @@ final class SafetyRulesTests: XCTestCase {
         ))
     }
 
+    func testDynamicMediaCanOnlyBeManuallyChosen() {
+        let video = AssetRecord(
+            localIdentifier: "video", favorite: false, isEdited: false,
+            mediaType: .video, pixelWidth: 100, pixelHeight: 100, duration: 2,
+            creationDate: Date(timeIntervalSince1970: 1_700_000_000),
+            isScreenshot: false, isLivePhoto: false, latitude: nil, longitude: nil
+        )
+        XCTAssertFalse(SafetyRules.canPreselectDelete(
+            asset: video, groupSize: 2, isOnlyInGroup: false
+        ))
+        XCTAssertTrue(SafetyRules.canUserRequestDelete(asset: video, userKept: false))
+    }
+
     // MARK: 红线常量钉死
 
     func testRedLineConstantsArePinned() {

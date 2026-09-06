@@ -73,6 +73,10 @@ final class ScanningEngine: ScanningEngineProtocol {
     private var lowQualitySnapshot: [LowQualityCandidate] = []
     /// 大媒体候选快照（T17，估算体积降序）。镜像受 snapshotLock 保护。
     private var largeMediaSnapshot: [LargeMediaCandidate] = []
+    /// 当前轮次读取到的用户 keep 保护。nil 表示安全数据不可用，不能生成
+    /// 自动建议；空集合表示读取成功但目前没有 keep 记录。
+    private var keepDecisionIDsForRun: Set<String>?
+    private var safetyErrorSnapshot: String?
 
     /// 仅在 workQueue 上读写。
     private var isDriving = false
@@ -129,6 +133,14 @@ final class ScanningEngine: ScanningEngineProtocol {
         return progressSnapshot
     }
 
+    /// 安全数据读取失败时的可见错误。失败期间只暂停/收窄建议，不向用户
+    /// 显示一个看似完整但可能遗漏 keep 保护的清单。
+    var safetyError: String? {
+        snapshotLock.lock()
+        defer { snapshotLock.unlock() }
+        return safetyErrorSnapshot
+    }
+
     /// 删除完成后刷新内存视图（T10）：从候选组与评分视图里移除已删 id，
     /// 成员数跌破 2 的组随之解散。须在 workQueue 上调用（经 enqueue 包装）。
     func purgeDeletedFromViews(assetIds: [String], completion: (() -> Void)? = nil) {
@@ -143,7 +155,7 @@ final class ScanningEngine: ScanningEngineProtocol {
             }
             let oldCandidateGroups = self.candidateGroupsOnQueue()
             let oldScoredGroups = self.scoredGroupsOnQueue()
-            let protectedIDs = self.database.assetIDs(withVerdict: .keep)
+            let protectedIDs = self.keepDecisionIDsOnQueue()
 
             var keptGroups: [CandidateGroup] = []
             for group in oldCandidateGroups {
@@ -172,12 +184,14 @@ final class ScanningEngine: ScanningEngineProtocol {
                     groupID: scored.groupID,
                     reason: scored.reason,
                     members: rebuiltMembers,
-                    preselectableIDs: GroupScoring.preselectableIDs(
-                        for: rebuiltMembers,
-                        hashByID: self.hashByID,
-                        embeddingByID: self.embeddingByID
-                    )
-                        .filter { !protectedIDs.contains($0) }
+                    preselectableIDs: protectedIDs.map { ids in
+                        GroupScoring.preselectableIDs(
+                            for: rebuiltMembers,
+                            hashByID: self.hashByID,
+                            embeddingByID: self.embeddingByID,
+                            protectedIDs: ids
+                        )
+                    } ?? []
                 ))
             }
             let deletedIds = deleted
@@ -340,18 +354,48 @@ final class ScanningEngine: ScanningEngineProtocol {
 
     /// 清空当轮内存快照与中间结果（全量重扫的干净起点）。
     /// 仅允许在 workQueue 上调用（与其它快照写路径同队列约束）。
-    private func clearRunSnapshots() {
+    private func clearRunSnapshots(clearSafetyError: Bool = true) {
         fetchedRecords = []
         hashByID = [:]
         embeddingByID = [:]
         scoresByID = [:]
+        keepDecisionIDsForRun = nil
         snapshotLock.lock()
         candidateGroupsSnapshot = []
         scoredGroupsSnapshot = []
         lowQualitySnapshot = []
         largeMediaSnapshot = []
+        if clearSafetyError {
+            safetyErrorSnapshot = nil
+        }
         snapshotLock.unlock()
         clearPersistedSnapshotsOnQueue()
+    }
+
+    /// 读取 keep 必须区分“空集合”和“读取失败”。安全保护表不可读时，
+    /// 自动建议只能暂停，不能把失败当成没有保护记录。
+    private func keepDecisionIDsOnQueue() -> Set<String>? {
+        switch database.assetIDsResult(withVerdict: .keep) {
+        case .success(let ids):
+            snapshotLock.lock()
+            safetyErrorSnapshot = nil
+            snapshotLock.unlock()
+            return ids
+        case .failure(let error):
+            snapshotLock.lock()
+            safetyErrorSnapshot = "无法读取用户保留记录，删除建议已暂停：\(error.localizedDescription)"
+            snapshotLock.unlock()
+            return nil
+        }
+    }
+
+    private func pauseForSafetyFailureOnQueue() {
+        if machine.isActive {
+            machine.pause(reason: "无法读取用户保留记录")
+        }
+        publishSnapshot()
+        reportProgress()
+        notifyResultsChanged()
     }
 
     /// 从已完成扫描保存的值恢复候选镜像。资产元数据必须与保存时一致；
@@ -386,6 +430,14 @@ final class ScanningEngine: ScanningEngineProtocol {
             notifyResultsChanged()
             return
         }
+        guard let protectedIDs = keepDecisionIDsOnQueue() else {
+            clearRunSnapshots(clearSafetyError: false)
+            _ = machine.reset()
+            publishSnapshot()
+            notifyResultsChanged()
+            return
+        }
+        keepDecisionIDsForRun = protectedIDs
         let current = uniqueRecords(
             photoLibrary.fetchAllAssets().filter { !$0.localIdentifier.isEmpty }
         )
@@ -426,7 +478,8 @@ final class ScanningEngine: ScanningEngineProtocol {
             let safeIDs = GroupScoring.preselectableIDs(
                 for: group.members,
                 hashByID: hashByID,
-                embeddingByID: embeddingByID
+                embeddingByID: embeddingByID,
+                protectedIDs: protectedIDs
             )
             return ScoredGroup(
                 groupID: group.groupID,
@@ -877,6 +930,12 @@ final class ScanningEngine: ScanningEngineProtocol {
     /// scoring：逐组跑 GroupScoring（KeepScore 接线 + 冗余度 + SafetyRules 过滤）
     /// → Best Shot 标记 → 预删除候选集。缺特征的资产按中性值参与评分。
     private func runScoringStage() -> Bool {
+        guard let protectedIDs = keepDecisionIDsOnQueue() else {
+            pauseForSafetyFailureOnQueue()
+            return false
+        }
+        keepDecisionIDsForRun = protectedIDs
+
         // 复用已持久化的分数（信封 kind=3）。
         for (assetId, values) in database.allFeatureprintScores(featureVersion: ScanStateMachine.featureVersion)
         where values.count == 4 {
@@ -887,7 +946,6 @@ final class ScanningEngine: ScanningEngineProtocol {
         }
 
         let groups = candidateGroupsOnQueue()
-        let protectedIDs = database.assetIDs(withVerdict: .keep)
         let total = max(groups.count, 1)
         var scored: [ScoredGroup] = []
         for (index, group) in groups.enumerated() {
@@ -923,7 +981,8 @@ final class ScanningEngine: ScanningEngineProtocol {
                 featuresByID: scoresByID,
                 hashByID: hashByID,
                 embeddingByID: embeddingByID,
-                hasUserData: hasUserData
+                hasUserData: hasUserData,
+                protectedIDs: protectedIDs
             )
             // 用户在此前扫描中明确保留的资产可继续展示，但永不重新成为
             // 自动预删除候选；将历史保护应用在评分输出的最后一道边界。
@@ -931,7 +990,7 @@ final class ScanningEngine: ScanningEngineProtocol {
                 groupID: scoredGroup.groupID,
                 reason: scoredGroup.reason,
                 members: scoredGroup.members,
-                preselectableIDs: scoredGroup.preselectableIDs.filter { !protectedIDs.contains($0) }
+                preselectableIDs: scoredGroup.preselectableIDs
             ))
 
             throttleForThermalPressure()
@@ -960,7 +1019,10 @@ final class ScanningEngine: ScanningEngineProtocol {
     /// 大库优化属后续迭代（可与 hashing 阶段合并采样）。
     private func detectLowQuality() -> Bool {
         let claimed = Set(candidateGroupsOnQueue().flatMap(\.memberIDs))
-        let protectedIDs = database.assetIDs(withVerdict: .keep)
+        guard let protectedIDs = keepDecisionIDsForRun else {
+            pauseForSafetyFailureOnQueue()
+            return false
+        }
         var detected: [LowQualityCandidate] = []
 
         for record in fetchedRecords {
@@ -1052,10 +1114,14 @@ final class ScanningEngine: ScanningEngineProtocol {
     /// 低质量 pass 一致：用户 keep 不改写。估算值同步落 assets.estimated_bytes。
     private func detectLargeMedia() -> Bool {
         let claimed = Set(candidateGroupsOnQueue().flatMap(\.memberIDs))
+        guard let protectedIDs = keepDecisionIDsForRun else {
+            pauseForSafetyFailureOnQueue()
+            return false
+        }
         let candidates = LargeMediaFilter.candidates(
             from: fetchedRecords,
             idsInCandidateGroups: claimed,
-            idsWithKeepDecision: database.assetIDs(withVerdict: .keep)
+            idsWithKeepDecision: protectedIDs
         )
 
         let safeCandidates = candidates.map { candidate in

@@ -21,12 +21,14 @@ struct DeletionReviewView: View {
     var onDeleted: ([String]) -> Void = { _ in }
 
     @State private var selectedIDs: Set<String> = []
+    @State private var selectionSources: [String: DeletionSelectionSource] = [:]
     @State private var isDeleting = false
     @State private var statusText: String?
     @State private var viewerContext: ViewerContext?
     /// 删除回调异步返回时，页面也要立即从本地列表移除已消失成员，
     /// 避免继续显示已删除缩略图或把它们再次提交到系统确认框。
     @State private var visibleCandidates: [ScoredGroup]
+    private let deletionCoordinator: DeletionCoordinator
 
     init(
         candidates: [ScoredGroup],
@@ -38,12 +40,16 @@ struct DeletionReviewView: View {
         self.environment = environment
         self.deletionService = deletionService
         self.database = database
+        self.deletionCoordinator = DeletionCoordinator(
+            photoLibrary: deletionService,
+            database: database
+        )
         self.onDeleted = onDeleted
         _visibleCandidates = State(initialValue: candidates)
     }
 
     private var displayableGroups: [ScoredGroup] {
-        visibleCandidates.filter { !$0.preselectableIDs.isEmpty }
+        visibleCandidates.filter { $0.members.count >= 2 }
     }
 
     private var totalPreselectableCount: Int {
@@ -105,7 +111,8 @@ struct DeletionReviewView: View {
             GroupPhotoViewer(
                 group: context.group,
                 startIndex: context.startIndex,
-                selectedIDs: $selectedIDs
+                selectedIDs: $selectedIDs,
+                selectionSources: $selectionSources
             )
         }
     }
@@ -114,8 +121,10 @@ struct DeletionReviewView: View {
         Button(allSuggestedSelected ? "取消全选" : "全选建议") {
             if allSuggestedSelected {
                 selectedIDs.subtract(allPreselectableIDs)
+                allPreselectableIDs.forEach { selectionSources[$0] = nil }
             } else {
                 selectedIDs.formUnion(allPreselectableIDs)
+                allPreselectableIDs.forEach { selectionSources[$0] = .suggestion }
             }
         }
         .buttonStyle(.bordered)
@@ -143,12 +152,17 @@ struct DeletionReviewView: View {
                         HStack {
                             Text("\(shortGroupLabel(group)) · 共 \(group.members.count) 张")
                             Spacer()
-                            let allSelected = group.preselectableIDs.allSatisfy { selectedIDs.contains($0) }
+                            let allSelected = !group.preselectableIDs.isEmpty
+                                && group.preselectableIDs.allSatisfy { selectedIDs.contains($0) }
                             Button(allSelected ? "取消全选" : "全选建议") {
                                 if allSelected {
                                     selectedIDs.subtract(group.preselectableIDs)
+                                    group.preselectableIDs.forEach { selectionSources[$0] = nil }
                                 } else {
                                     selectedIDs.formUnion(group.preselectableIDs)
+                                    group.preselectableIDs.forEach {
+                                        selectionSources[$0] = .suggestion
+                                    }
                                 }
                             }
                             .font(.caption)
@@ -235,8 +249,10 @@ struct DeletionReviewView: View {
     private func toggleSelection(_ id: String) {
         if selectedIDs.contains(id) {
             selectedIDs.remove(id)
+            selectionSources[id] = nil
         } else {
             selectedIDs.insert(id)
+            selectionSources[id] = .user
         }
     }
 
@@ -246,44 +262,34 @@ struct DeletionReviewView: View {
     }
 
     private func confirmDeletion() {
-        // 进入系统确认框前重新向 PhotoKit 校验一次，避免页面停留期间
-        // 已被外部删除/变更的旧 id 被再次提交。
-        let requested = selectedIDs.sorted()
-        let existingIDs = Set(deletionService.fetchAssets(matching: requested)
-            .map(\.localIdentifier))
-        let ids = requested.filter { existingIDs.contains($0) }
-        guard !ids.isEmpty else {
-            selectedIDs.removeAll()
-            statusText = "所选照片已不在相册中。"
-            reloadFromEnvironment()
-            return
-        }
         isDeleting = true
-        statusText = "等待你在系统确认框中批准…"
-        deletionService.requestDelete(of: ids) { success, error in
+        statusText = "正在复核最新相册状态…"
+        let selections = selectedIDs.sorted().map { id in
+            DeletionSelection(assetID: id, source: selectionSources[id] ?? .user)
+        }
+        deletionCoordinator.execute(selections: selections, groups: visibleCandidates) { preflight, result in
+            let approved = Set(result?.approvedIDs ?? [])
+            let blockedText = preflight.blocked.map { "\($0.assetID)：\($0.reason.rawValue)" }.joined(separator: "、")
+            if !approved.isEmpty {
+                database.markDeleted(assetIds: Array(approved))
+                selectedIDs.subtract(approved)
+                approved.forEach { selectionSources[$0] = nil }
+                removeDeletedFromVisible(approved)
+                onDeleted(Array(approved))
+            }
             isDeleting = false
-            if success {
-                database.markDeleted(assetIds: ids)
-                selectedIDs.removeAll()
-                removeDeletedFromVisible(Set(ids))
-                onDeleted(ids)
+            if preflight.safetyDataAvailable == false {
+                statusText = "无法读取保留记录，未提交任何删除。"
+            } else if let result, result.cancelled {
+                statusText = "已记录此前批准的项目；系统确认被取消，后续批次未执行。"
+            } else if let result, result.hasFailure {
+                statusText = "已记录此前批准的项目；后续批次失败，未执行的项目可重试。"
+            } else if !blockedText.isEmpty {
+                statusText = "部分选择已撤销：\(blockedText)"
+            } else if !approved.isEmpty {
                 statusText = "已批准删除。照片将在系统\"最近删除\"保留约 30 天。"
             } else {
-                // 删除服务按批次执行时可能出现部分成功；用 PhotoKit 当前快照
-                // 区分真正消失的项目，避免把已成功删除的项留在待删清单里。
-                let survivors = Set(deletionService.fetchAssets(matching: ids)
-                    .map(\.localIdentifier))
-                let deleted = Set(ids).subtracting(survivors)
-                if !deleted.isEmpty {
-                    let deletedIDs = Array(deleted)
-                    database.markDeleted(assetIds: deletedIDs)
-                    selectedIDs.subtract(deleted)
-                    removeDeletedFromVisible(deleted)
-                    onDeleted(deletedIDs)
-                    statusText = "已删除 \(deleted.count) 张；其余项目未执行，可重试。"
-                } else {
-                    statusText = "未执行删除\(error.map { "：\($0.localizedDescription)" } ?? "。")可重试。"
-                }
+                statusText = "没有仍符合安全条件的选择。"
             }
         }
     }
@@ -295,6 +301,7 @@ struct DeletionReviewView: View {
             group.members.map { $0.record.localIdentifier }
         })
         selectedIDs.formIntersection(visibleIDs)
+        selectionSources = selectionSources.filter { visibleIDs.contains($0.key) }
     }
 
     private func removeDeletedFromVisible(_ deleted: Set<String>) {
@@ -328,6 +335,7 @@ struct DeletionReviewView: View {
             group.members.map { $0.record.localIdentifier }
         })
         selectedIDs.formIntersection(visibleIDs)
+        selectionSources = selectionSources.filter { visibleIDs.contains($0.key) }
     }
 }
 
@@ -342,12 +350,19 @@ struct GroupPhotoViewer: View {
     let group: ScoredGroup
     @State private var currentIndex: Int
     @Binding var selectedIDs: Set<String>
+    @Binding var selectionSources: [String: DeletionSelectionSource]
     @Environment(\.dismiss) private var dismiss
 
-    init(group: ScoredGroup, startIndex: Int, selectedIDs: Binding<Set<String>>) {
+    init(
+        group: ScoredGroup,
+        startIndex: Int,
+        selectedIDs: Binding<Set<String>>,
+        selectionSources: Binding<[String: DeletionSelectionSource]>
+    ) {
         self.group = group
         _currentIndex = State(initialValue: startIndex)
         _selectedIDs = selectedIDs
+        _selectionSources = selectionSources
     }
 
     private var currentMember: ScoredMember? {
@@ -405,8 +420,10 @@ struct GroupPhotoViewer: View {
             Button {
                 if selected {
                     selectedIDs.remove(id)
+                    selectionSources[id] = nil
                 } else {
                     selectedIDs.insert(id)
+                    selectionSources[id] = .user
                 }
             } label: {
                 Text(selected ? "✓ 已选中（点此取消）" : "选中此张")

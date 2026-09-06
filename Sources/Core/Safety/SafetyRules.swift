@@ -11,6 +11,20 @@
 
 import Foundation
 
+/// 自动建议被安全层拒绝的原因。原因会沿着删除预检传到 UI，避免把
+/// “没有建议”误解成扫描失败，也避免为了展示解释而重新读取敏感数据。
+enum SuggestionBlockReason: String, Codable, Equatable {
+    case favorite
+    case edited
+    case onlyAsset
+    case userKept
+    case missingFeature
+    case noDirectReplacement
+    case unsupportedDynamicMedia
+    case unavailable
+    case safetyDataUnavailable
+}
+
 enum SafetyRules {
     // MARK: 硬编码红线常量（永不参数化、永不提供开关）
 
@@ -43,7 +57,16 @@ enum SafetyRules {
         if SafetyRules.neverDeleteOnlyInGroup && groupSize <= 1 { return false }
         // 红线 3b：显式"组内唯一"标记 → 永不预选。
         if SafetyRules.neverDeleteOnlyInGroup && isOnlyInGroup { return false }
+        // 静态封面不足以证明视频或 Live Photo 的动态内容相同；本轮只允许
+        // 展示和用户手动选择，不生成自动删除建议。
+        if asset.mediaType == .video || asset.isLivePhoto { return false }
         return true
+    }
+
+    /// 用户手动提交前也必须重新尊重收藏、编辑和 keep 保护。
+    /// 动态媒体可以手动删除，因此这里不复用自动建议的媒体限制。
+    static func canUserRequestDelete(asset: AssetRecord, userKept: Bool) -> Bool {
+        !asset.favorite && !asset.isEdited && !userKept
     }
 
     /// 对整个候选组做过滤：返回组内允许预选删除的成员（保持原有时间顺序）。

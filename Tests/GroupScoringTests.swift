@@ -68,8 +68,9 @@ final class GroupScoringTests: XCTestCase {
         XCTAssertEqual(scored.members.count, 4)
         XCTAssertEqual(scored.bestShot?.record.localIdentifier, "plain-1")
 
-        // 红线：收藏过 / 编辑过的绝不出现在预选集；Best Shot 本身也不进。
-        XCTAssertEqual(scored.preselectableIDs, ["plain-2"])
+        // 缺少同版本哈希/embedding 时只展示组，不扩大自动删除建议；
+        // 收藏、编辑和 Best Shot 也都不进入预选集。
+        XCTAssertTrue(scored.preselectableIDs.isEmpty)
         XCTAssertFalse(scored.preselectableIDs.contains("fav"))
         XCTAssertFalse(scored.preselectableIDs.contains("edited"))
         XCTAssertFalse(scored.preselectableIDs.contains("plain-1"))
@@ -97,6 +98,73 @@ final class GroupScoringTests: XCTestCase {
         )
         XCTAssertEqual(scored.members.count, 2)
         XCTAssertEqual(scored.members[0].score, scored.members[1].score, "全中性同分")
+        XCTAssertTrue(scored.preselectableIDs.isEmpty, "缺少特征时不得生成自动删除建议")
+    }
+
+    func testDynamicMediaNeverReceivesAutomaticSuggestion() {
+        let video = AssetRecord(
+            localIdentifier: "video",
+            favorite: false,
+            isEdited: false,
+            mediaType: .video,
+            pixelWidth: 100,
+            pixelHeight: 100,
+            duration: 2,
+            creationDate: Date(timeIntervalSince1970: 1_700_000_000),
+            isScreenshot: false,
+            isLivePhoto: false,
+            latitude: nil,
+            longitude: nil
+        )
+        let photo = makeRecord(id: "photo", seconds: 30)
+        let scored = GroupScoring.score(
+            group: group([video, photo]),
+            featuresByID: [:],
+            hashByID: [:],
+            embeddingByID: ["video": [1, 0], "photo": [1, 0]]
+        )
+        XCTAssertFalse(scored.preselectableIDs.contains("video"))
+    }
+
+    func testProtectedKeepNeverReturnsToPreselection() {
+        let records = [
+            makeRecord(id: "best"),
+            makeRecord(id: "kept", seconds: 30),
+            makeRecord(id: "drop", seconds: 60),
+        ]
+        let scored = GroupScoring.score(
+            group: group(records),
+            featuresByID: [
+                "best": features(clarity: 1),
+                "kept": features(clarity: 0.2),
+                "drop": features(clarity: 0.1),
+            ],
+            hashByID: [:],
+            embeddingByID: [
+                "best": [1, 0], "kept": [1, 0], "drop": [1, 0]
+            ],
+            protectedIDs: ["kept"]
+        )
+        XCTAssertFalse(scored.preselectableIDs.contains("kept"))
+        XCTAssertTrue(scored.preselectableIDs.contains("drop"))
+    }
+
+    func testSelectedBestShotCannotRemainReplacementEvidence() {
+        let records = [
+            makeRecord(id: "best"),
+            makeRecord(id: "drop", seconds: 30),
+        ]
+        let members = [
+            ScoredMember(record: records[0], score: 1, isBestShot: true),
+            ScoredMember(record: records[1], score: 0, isBestShot: false),
+        ]
+        let result = GroupScoring.preselectableIDs(
+            for: members,
+            hashByID: [:],
+            embeddingByID: ["best": [1, 0], "drop": [1, 0]],
+            selectedIDs: ["best"]
+        )
+        XCTAssertTrue(result.isEmpty)
     }
 
     // MARK: 冷启动 favoriteBoost 加倍（验收标准第 2 条前半）

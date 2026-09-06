@@ -153,12 +153,27 @@ final class SystemPhotoLibraryService: PhotoLibraryServiceProtocol {
         of identifiers: [String],
         completion: @escaping (Bool, Error?) -> Void
     ) {
+        requestDeleteDetailed(of: identifiers) { result in
+            let error: Error?
+            if let failed = result.batches.first(where: { $0.status == .failed || $0.status == .cancelled }) {
+                error = DeletionError.changeRequestFailed(reason: failed.reason)
+            } else {
+                error = nil
+            }
+            completion(result.approvedIDs.count == identifiers.count, error)
+        }
+    }
+
+    func requestDeleteDetailed(
+        of identifiers: [String],
+        completion: @escaping (DeletionRequestResult) -> Void
+    ) {
         var seen = Set<String>()
         let normalizedIdentifiers = identifiers.filter { id in
             !id.isEmpty && seen.insert(id).inserted
         }
         guard !normalizedIdentifiers.isEmpty else {
-            DispatchQueue.main.async { completion(true, nil) }
+            DispatchQueue.main.async { completion(DeletionRequestResult(batches: [])) }
             return
         }
         // 唯一删除通道：performChanges + deleteAssets，系统弹确认框由用户逐次批准。
@@ -166,35 +181,87 @@ final class SystemPhotoLibraryService: PhotoLibraryServiceProtocol {
         // 即停止后续批次——续传语义：调用方以 fetchAssets(matching:) 重查
         // 幸存者后重试，已删者自然消失。
         DispatchQueue.global(qos: .userInitiated).async {
-            let error = DeletionFlow.runBatches(normalizedIdentifiers) { batch, _ in
+            var results: [DeletionBatchResult] = []
+            var shouldContinue = true
+            for (index, batch) in DeletionFlow.batches(of: normalizedIdentifiers).enumerated() {
+                guard shouldContinue else {
+                    results.append(DeletionBatchResult(
+                        batchIndex: index,
+                        requestedIDs: batch,
+                        approvedIDs: [],
+                        status: .skipped,
+                        reason: "前一批次未完成"
+                    ))
+                    continue
+                }
+
+                let result: DeletionBatchResult = {
                 let semaphore = DispatchSemaphore(value: 0)
-                var batchError: Error?
+                var batchResult: DeletionBatchResult?
+                var submittedIDs: [String] = []
 
                 PHPhotoLibrary.shared().performChanges {
                     let assets = PHAsset.fetchAssets(withLocalIdentifiers: batch, options: nil)
                     let objects = assets.objects(at: IndexSet(integersIn: 0..<assets.count))
-                    PHAssetChangeRequest.deleteAssets(objects as NSArray)
+                    if objects.isEmpty {
+                        batchResult = DeletionBatchResult(
+                            batchIndex: index,
+                            requestedIDs: batch,
+                            approvedIDs: [],
+                            status: .skipped,
+                            reason: "资产已不存在"
+                        )
+                    } else {
+                        submittedIDs = objects.map(\.localIdentifier)
+                        PHAssetChangeRequest.deleteAssets(objects as NSArray)
+                    }
                 } completionHandler: { success, changeError in
-                    // 用户在确认框点取消 → success=false + PHPhotoLibraryError.userCancelled，
-                    // 同样走失败路径：零删除发生、调用方可重试（T10 验收的拒绝路径）。
-                    batchError = success ? nil : (changeError ?? DeletionError.changeRequestFailed)
+                    if batchResult == nil {
+                        if success {
+                            batchResult = DeletionBatchResult(
+                                batchIndex: index,
+                                requestedIDs: batch,
+                                approvedIDs: submittedIDs,
+                                status: .approved,
+                                reason: nil
+                            )
+                        } else {
+                            let nsError = changeError as NSError?
+                            let cancelled = nsError?.domain == "PHPhotosErrorDomain"
+                                && nsError?.code == 3072
+                            batchResult = DeletionBatchResult(
+                                batchIndex: index,
+                                requestedIDs: batch,
+                                approvedIDs: [],
+                                status: cancelled ? .cancelled : .failed,
+                                reason: changeError?.localizedDescription ?? "系统删除确认失败"
+                            )
+                        }
+                    }
                     semaphore.signal()
                 }
                 semaphore.wait()
+                return batchResult ?? DeletionBatchResult(
+                    batchIndex: index,
+                    requestedIDs: batch,
+                    approvedIDs: [],
+                    status: .failed,
+                    reason: "系统删除结果缺失"
+                )
+                }()
 
-                if let batchError {
-                    throw batchError
-                }
+                results.append(result)
+                shouldContinue = result.status == .approved
             }
 
             DispatchQueue.main.async {
-                completion(error == nil, error)
+                completion(DeletionRequestResult(batches: results))
             }
         }
     }
 
     enum DeletionError: Error {
-        case changeRequestFailed
+        case changeRequestFailed(reason: String?)
     }
 
     // MARK: 纯函数层（CI 单测覆盖）

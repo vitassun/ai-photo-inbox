@@ -15,6 +15,39 @@ enum PhotoAuthorizationStatus: Equatable {
     case limited
 }
 
+enum DeletionBatchStatus: String, Codable, Equatable {
+    case approved
+    case cancelled
+    case failed
+    case skipped
+}
+
+/// 系统确认流的逐批结果。approvedIDs 只包含 PhotoKit 明确报告成功的 id；
+/// 取消、失败和后续跳过批次绝不由 UI 通过“资产是否消失”反推。
+struct DeletionBatchResult: Codable, Equatable {
+    let batchIndex: Int
+    let requestedIDs: [String]
+    let approvedIDs: [String]
+    let status: DeletionBatchStatus
+    let reason: String?
+}
+
+struct DeletionRequestResult: Codable, Equatable {
+    let batches: [DeletionBatchResult]
+
+    var approvedIDs: [String] {
+        batches.flatMap(\.approvedIDs)
+    }
+
+    var cancelled: Bool {
+        batches.contains { $0.status == .cancelled }
+    }
+
+    var hasFailure: Bool {
+        batches.contains { $0.status == .failed }
+    }
+}
+
 protocol PhotoLibraryServiceProtocol {
     /// 当前相册访问授权状态（不触发弹窗）。
     var authorizationStatus: PhotoAuthorizationStatus { get }
@@ -38,4 +71,30 @@ protocol PhotoLibraryServiceProtocol {
         of identifiers: [String],
         completion: @escaping (_ success: Bool, _ error: Error?) -> Void
     )
+
+    /// 带逐批结果的删除入口。默认实现兼容旧的协议假实现；PhotoKit 真实
+    /// 实现必须覆盖它并返回 approved/cancelled/failed/skipped 的精确 id。
+    func requestDeleteDetailed(
+        of identifiers: [String],
+        completion: @escaping (DeletionRequestResult) -> Void
+    )
+}
+
+extension PhotoLibraryServiceProtocol {
+    func requestDeleteDetailed(
+        of identifiers: [String],
+        completion: @escaping (DeletionRequestResult) -> Void
+    ) {
+        requestDelete(of: identifiers) { success, error in
+            let status: DeletionBatchStatus = success ? .approved : .failed
+            let batch = DeletionBatchResult(
+                batchIndex: 0,
+                requestedIDs: identifiers,
+                approvedIDs: success ? identifiers : [],
+                status: status,
+                reason: error?.localizedDescription
+            )
+            completion(DeletionRequestResult(batches: [batch]))
+        }
+    }
 }

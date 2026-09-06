@@ -43,7 +43,9 @@ enum GroupScoring {
         featuresByID: [String: VisionAnalysisResult],
         hashByID: [String: String],
         embeddingByID: [String: [Double]],
-        hasUserData: Bool = false
+        hasUserData: Bool = false,
+        protectedIDs: Set<String> = [],
+        selectedIDs: Set<String> = []
     ) -> ScoredGroup {
         let neutral = VisionAnalysisResult(clarity: 0.5, aesthetics: 0.5, faceQuality: 0.5, saliency: 0.5)
 
@@ -86,7 +88,9 @@ enum GroupScoring {
         let preselectable = preselectableIDs(
             for: flagged,
             hashByID: hashByID,
-            embeddingByID: embeddingByID
+            embeddingByID: embeddingByID,
+            protectedIDs: protectedIDs,
+            selectedIDs: selectedIDs
         )
 
         return ScoredGroup(
@@ -108,7 +112,9 @@ enum GroupScoring {
     static func preselectableIDs(
         for members: [ScoredMember],
         hashByID: [String: String],
-        embeddingByID: [String: [Double]]
+        embeddingByID: [String: [Double]],
+        protectedIDs: Set<String> = [],
+        selectedIDs: Set<String> = []
     ) -> [String] {
         guard !members.isEmpty else { return [] }
         let group = CandidateGroup(
@@ -117,28 +123,48 @@ enum GroupScoring {
             reason: ""
         )
         let allowedIDs = Set(SafetyRules.preselectableMembers(in: group).map(\.localIdentifier))
+            .subtracting(protectedIDs)
         // 正常产物中 Best Shot 在首位；同时按标记兜底，避免调用方传入顺序
         // 异常时把 Best Shot 放进自动删除集合。
         let bestID = members.first(where: \.isBestShot)?.record.localIdentifier
             ?? members.first?.record.localIdentifier
+        let hasAnyFeature = members.contains { member in
+            hashByID[member.record.localIdentifier] != nil
+                || embeddingByID[member.record.localIdentifier] != nil
+        }
+        // 缺少同版本特征时不能证明替代关系；只展示组，不扩张自动删除建议。
+        guard hasAnyFeature else { return [] }
+        // In the normal scan no asset has been selected by the user yet.  Use
+        // the stable keep set (Best Shot plus explicit protections) as the
+        // replacement evidence so a transitive A~B~C chain cannot make both
+        // B and C deletable.  Once the user has selected assets, recompute
+        // against every remaining member; this is what keeps a hand-selected
+        // Best Shot from being treated as a replacement.
+        let replacementIDs: Set<String>
+        if selectedIDs.isEmpty {
+            replacementIDs = Set([bestID].compactMap { $0 }).union(protectedIDs)
+        } else {
+            replacementIDs = Set(members.map { $0.record.localIdentifier })
+                .subtracting(selectedIDs)
+        }
         let eligible = members.compactMap { member -> String? in
             guard member.record.localIdentifier != bestID,
-                  allowedIDs.contains(member.record.localIdentifier) else { return nil }
-            // 如果没有任何特征可用于直接验证，保留原有组语义；这主要服务
-            // 旧数据/纯逻辑测试。真实扫描的组至少有 pHash 或 embedding。
-            let hasComparableFeature = members.contains { member in
-                hashByID[member.record.localIdentifier] != nil
-                    || embeddingByID[member.record.localIdentifier] != nil
+                  allowedIDs.contains(member.record.localIdentifier),
+                  !selectedIDs.contains(member.record.localIdentifier) else { return nil }
+            // 最终选择集合中的资产不能继续作为替代品；否则用户手动选中
+            // Best Shot 后，剩余自动建议仍会错误地依赖它。
+            let hasDirectReplacement = members.contains { replacement in
+                let replacementID = replacement.record.localIdentifier
+                guard replacementID != member.record.localIdentifier,
+                      replacementIDs.contains(replacementID) else { return false }
+                return directlySimilar(
+                    member.record,
+                    replacement.record,
+                    hashByID: hashByID,
+                    embeddingByID: embeddingByID
+                )
             }
-            if hasComparableFeature {
-                let best = members.first { $0.record.localIdentifier == bestID }
-                guard let best,
-                      directlySimilar(member.record, best.record,
-                                      hashByID: hashByID,
-                                      embeddingByID: embeddingByID) else {
-                    return nil
-                }
-            }
+            guard hasDirectReplacement else { return nil }
             return member.record.localIdentifier
         }
         let maxCount = Int(floor(Double(members.count) * AppConfig.maxPreselectedDeletionRatio))

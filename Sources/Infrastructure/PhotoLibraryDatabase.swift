@@ -547,14 +547,24 @@ final class PhotoLibraryDatabase {
 
     /// 返回已有指定裁决的资产 id，用于自动候选生成时尊重用户的 keep。
     func assetIDs(withVerdict verdict: Verdict) -> Set<String> {
-        let ids = (try? writer.read { db in
-            try String.fetchAll(
-                db,
-                sql: "SELECT asset_id FROM decisions WHERE verdict = ? AND deleted_at IS NULL",
-                arguments: [verdict.rawValue]
-            )
-        }) ?? []
-        return Set(ids)
+        (try? assetIDsResult(withVerdict: verdict).get()) ?? []
+    }
+
+    /// 安全相关读取不能把数据库异常伪装成空集合。自动建议生成使用这个
+    /// 显式结果；失败时调用方必须暂停建议，而不是放行更多资产。
+    func assetIDsResult(withVerdict verdict: Verdict) -> Result<Set<String>, Error> {
+        do {
+            let ids = try writer.read { db in
+                try String.fetchAll(
+                    db,
+                    sql: "SELECT asset_id FROM decisions WHERE verdict = ? AND deleted_at IS NULL",
+                    arguments: [verdict.rawValue]
+                )
+            }
+            return .success(Set(ids))
+        } catch {
+            return .failure(error)
+        }
     }
 
     /// 丢弃非当前版本的特征行（ScanStateMachine.FEATURE_VERSION 变更后的脏数据清理）。

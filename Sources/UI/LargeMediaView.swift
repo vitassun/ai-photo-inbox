@@ -13,6 +13,7 @@ struct LargeMediaView: View {
 
     @State private var candidates: [LargeMediaCandidate] = []
     @State private var selectedIDs: Set<String> = []
+    @State private var selectionSources: [String: DeletionSelectionSource] = [:]
     @State private var isDeleting = false
     @State private var statusText: String?
     @State private var showOffloaded = false
@@ -33,6 +34,13 @@ struct LargeMediaView: View {
 
     private var allSuggestedSelected: Bool {
         !allSuggestedIDs.isEmpty && allSuggestedIDs.allSatisfy { selectedIDs.contains($0) }
+    }
+
+    private var deletionCoordinator: DeletionCoordinator {
+        DeletionCoordinator(
+            photoLibrary: environment.photoLibraryService,
+            database: environment.database
+        )
     }
 
     /// 勾选集的可释放估算（仅本机资产可勾选）。
@@ -121,8 +129,10 @@ struct LargeMediaView: View {
         Button(allSuggestedSelected ? "取消全选" : "全选建议") {
             if allSuggestedSelected {
                 selectedIDs.subtract(allSuggestedIDs)
+                allSuggestedIDs.forEach { selectionSources[$0] = nil }
             } else {
                 selectedIDs.formUnion(allSuggestedIDs)
+                allSuggestedIDs.forEach { selectionSources[$0] = .suggestion }
             }
         }
         .buttonStyle(.bordered)
@@ -245,63 +255,51 @@ struct LargeMediaView: View {
         let validIDs = Set(candidates.filter { $0.record.locallyAvailable }
             .map(\.record.localIdentifier))
         selectedIDs.formIntersection(validIDs)
+        selectionSources = selectionSources.filter { validIDs.contains($0.key) }
     }
 
     private func toggleSelection(_ id: String) {
         if selectedIDs.contains(id) {
             selectedIDs.remove(id)
+            selectionSources[id] = nil
         } else {
             selectedIDs.insert(id)
+            selectionSources[id] = .user
         }
     }
 
     private func confirmDeletion() {
-        let requested = selectedIDs.sorted()
-        let existingIDs = Set(environment.photoLibraryService.fetchAssets(matching: requested)
-            .map(\.localIdentifier))
-        let ids = requested.filter { existingIDs.contains($0) }
-        guard !ids.isEmpty else {
-            selectedIDs.removeAll()
-            statusText = "所选项目已不在相册中。"
-            reload()
-            return
-        }
         isDeleting = true
-        statusText = "等待你在系统确认框中批准…"
-        environment.photoLibraryService.requestDelete(of: ids) { success, error in
-            isDeleting = false
-            if success {
-                environment.database.markDeleted(assetIds: ids)
-                selectedIDs.removeAll()
-                statusText = "已批准删除。项目将在系统\"最近删除\"保留约 30 天。"
-                environment.engine.purgeDeletedFromViews(assetIds: ids) {
+        statusText = "正在复核最新相册状态…"
+        let selections = selectedIDs.sorted().map { id in
+            DeletionSelection(assetID: id, source: selectionSources[id] ?? .user)
+        }
+        deletionCoordinator.execute(selections: selections, groups: []) { preflight, result in
+            let approved = Set(result?.approvedIDs ?? [])
+            if !approved.isEmpty {
+                environment.database.markDeleted(assetIds: Array(approved))
+                selectedIDs.subtract(approved)
+                approved.forEach { selectionSources[$0] = nil }
+                environment.engine.purgeDeletedFromViews(assetIds: Array(approved)) {
                     DispatchQueue.main.async {
-                        onDeleted(ids)
+                        onDeleted(Array(approved))
                         reload()
                     }
                 }
+            }
+            isDeleting = false
+            if !preflight.safetyDataAvailable {
+                statusText = "无法读取保留记录，未提交任何删除。"
+            } else if let result, result.cancelled {
+                statusText = "已记录此前批准的项目；系统确认被取消，后续批次未执行。"
+            } else if let result, result.hasFailure {
+                statusText = "已记录此前批准的项目；后续批次失败，可重试未完成项目。"
+            } else if !preflight.blocked.isEmpty {
+                statusText = "部分选择已撤销：\(preflight.blocked.map { "\($0.assetID)：\($0.reason.rawValue)" }.joined(separator: "、"))"
+            } else if approved.isEmpty {
+                statusText = "没有仍符合安全条件的选择。"
             } else {
-                // 分批删除可能前几批成功、后续批次被取消；重查幸存者，
-                // 只把确实消失的 id 记为已删除并从待选中移除。
-                let survivors = Set(environment.photoLibraryService
-                    .fetchAssets(matching: ids)
-                    .map(\.localIdentifier))
-                let deleted = Set(ids).subtracting(survivors)
-                if !deleted.isEmpty {
-                    let deletedIDs = Array(deleted)
-                    environment.database.markDeleted(assetIds: deletedIDs)
-                    selectedIDs.subtract(deleted)
-                    statusText = "已删除 \(deleted.count) 项；其余项目未执行，可重试。"
-                    environment.engine.purgeDeletedFromViews(assetIds: deletedIDs) {
-                        DispatchQueue.main.async {
-                            onDeleted(deletedIDs)
-                            reload()
-                        }
-                    }
-                } else {
-                    statusText = "未执行删除\(error.map { "：\($0.localizedDescription)" } ?? "。")可重试。"
-                    reload()
-                }
+                statusText = "已批准删除。项目将在系统\"最近删除\"保留约 30 天。"
             }
         }
     }
