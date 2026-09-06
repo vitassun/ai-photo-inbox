@@ -367,8 +367,12 @@ final class ScanningEngine: ScanningEngineProtocol {
 
             // 先失效缓存和自动裁决，再决定是否延后到本轮扫描结束处理；
             // 后续任何恢复路径都不能读到变更前的特征。
-            self.database.removeFeatureprints(assetIds: Array(changed))
-            self.database.clearAutomaticDeleteDecisions(assetIds: Array(changed))
+            guard self.database.removeFeatureprints(assetIds: Array(changed)),
+                  self.database.clearAutomaticDeleteDecisions(assetIds: Array(changed)) else {
+                self.setPersistenceErrorOnQueue("相册变更的旧分析结果清理失败，请检查存储空间后重试")
+                self.pauseForPersistenceFailureOnQueue()
+                return
+            }
             if self.machine.isActive {
                 self.pendingLibraryChange = true
                 self.pendingChangedIDs.formUnion(changed)
@@ -448,9 +452,13 @@ final class ScanningEngine: ScanningEngineProtocol {
                 }
                 // 新一轮全量扫描没有可验证的资产内容版本；清掉旧特征，
                 // 以正确性优先，避免同一 id 的修改照片复用旧结果。
-                self.database.purgeFeatureprints(keepingFeatureVersion: ScanStateMachine.featureVersion)
-                self.database.removeAllFeatureprints()
-                self.database.clearAutomaticDeleteDecisions()
+                guard self.database.purgeFeatureprints(keepingFeatureVersion: ScanStateMachine.featureVersion),
+                      self.database.removeAllFeatureprints(),
+                      self.database.clearAutomaticDeleteDecisions() else {
+                    self.setPersistenceErrorOnQueue("旧分析结果清理失败，请检查存储空间后重试")
+                    self.pauseForPersistenceFailureOnQueue()
+                    return
+                }
             }
             self.startDrivingOnQueue()
         }
@@ -848,8 +856,12 @@ final class ScanningEngine: ScanningEngineProtocol {
             fetchedRecords = currentRecords
 
             if metadataChanged {
-                database.removeAllFeatureprints()
-                database.clearAutomaticDeleteDecisions()
+                guard database.removeAllFeatureprints(),
+                      database.clearAutomaticDeleteDecisions() else {
+                    setPersistenceErrorOnQueue("旧分析结果清理失败，请检查存储空间后重试")
+                    pauseForPersistenceFailureOnQueue()
+                    return
+                }
                 clearRunSnapshots()
                 fetchedRecords = currentRecords
                 _ = machine.rewind(to: .hashing)

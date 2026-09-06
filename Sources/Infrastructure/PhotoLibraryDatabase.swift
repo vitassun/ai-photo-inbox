@@ -358,54 +358,72 @@ final class PhotoLibraryDatabase {
 
     /// 删除指定资产的全部分析特征。相册元数据发生变化时旧特征不能复用，
     /// 否则同一 localIdentifier 会继续使用修改前的图像结果。
-    func removeFeatureprints(assetIds: [String]) {
-        guard !assetIds.isEmpty else { return }
-        try? writer.write { db in
-            for assetId in Set(assetIds) {
-                try db.execute(
-                    sql: "DELETE FROM featureprints WHERE asset_id = ?",
-                    arguments: [assetId]
-                )
+    @discardableResult
+    func removeFeatureprints(assetIds: [String]) -> Bool {
+        guard !assetIds.isEmpty else { return true }
+        do {
+            try writer.write { db in
+                for assetId in Set(assetIds) {
+                    try db.execute(
+                        sql: "DELETE FROM featureprints WHERE asset_id = ?",
+                        arguments: [assetId]
+                    )
+                }
             }
+            return true
+        } catch {
+            return false
         }
     }
 
     /// 清空全部分析特征。新的全量扫描在没有资产内容版本可比时调用，
     /// 防止同一 localIdentifier 的修改内容复用旧 hash/embedding/score。
-    func removeAllFeatureprints() {
-        try? writer.write { db in
-            try db.execute(sql: "DELETE FROM featureprints")
+    @discardableResult
+    func removeAllFeatureprints() -> Bool {
+        do {
+            try writer.write { db in
+                try db.execute(sql: "DELETE FROM featureprints")
+            }
+            return true
+        } catch {
+            return false
         }
     }
 
     /// 清除由算法生成、但尚未得到系统删除确认的旧建议。用户 keep、
     /// 已确认删除和其它用户裁决均保留。
-    func clearAutomaticDeleteDecisions(assetIds: [String]? = nil) {
+    @discardableResult
+    func clearAutomaticDeleteDecisions(assetIds: [String]? = nil) -> Bool {
         // nil 表示清空全部；显式传入空数组表示没有资产变更，必须是 no-op，
         // 不能把一次“无 id 的变更通知”误解成全量清理。
-        if let assetIds, assetIds.isEmpty { return }
-        try? writer.write { db in
-            let automaticReason = "(reason LIKE 'low_quality:%' OR reason = 'large_media')"
-            if let assetIds, !assetIds.isEmpty {
-                for assetId in Set(assetIds) {
+        if let assetIds, assetIds.isEmpty { return true }
+        do {
+            try writer.write { db in
+                let automaticReason = "(reason LIKE 'low_quality:%' OR reason = 'large_media')"
+                if let assetIds, !assetIds.isEmpty {
+                    for assetId in Set(assetIds) {
+                        try db.execute(
+                            sql: """
+                            DELETE FROM decisions
+                            WHERE asset_id = ? AND verdict = 'delete' AND deleted_at IS NULL
+                              AND \(automaticReason)
+                            """,
+                            arguments: [assetId]
+                        )
+                    }
+                } else {
                     try db.execute(
                         sql: """
                         DELETE FROM decisions
-                        WHERE asset_id = ? AND verdict = 'delete' AND deleted_at IS NULL
+                        WHERE verdict = 'delete' AND deleted_at IS NULL
                           AND \(automaticReason)
-                        """,
-                        arguments: [assetId]
+                        """
                     )
                 }
-            } else {
-                try db.execute(
-                    sql: """
-                    DELETE FROM decisions
-                    WHERE verdict = 'delete' AND deleted_at IS NULL
-                      AND \(automaticReason)
-                    """
-                )
             }
+            return true
+        } catch {
+            return false
         }
     }
 
@@ -622,15 +640,21 @@ final class PhotoLibraryDatabase {
 
     /// 相册外部删除后移除本地索引；外键级联清理特征、裁决和动作审计。
     /// 这与 markDeleted 分开，避免把用户在系统确认框外的删除伪装成已批准操作。
-    func removeAssetsFromLibrary(assetIds: [String]) {
-        guard !assetIds.isEmpty else { return }
-        try? writer.write { db in
-            for assetId in Set(assetIds) {
-                try db.execute(
-                    sql: "DELETE FROM assets WHERE local_identifier = ?",
-                    arguments: [assetId]
-                )
+    @discardableResult
+    func removeAssetsFromLibrary(assetIds: [String]) -> Bool {
+        guard !assetIds.isEmpty else { return true }
+        do {
+            try writer.write { db in
+                for assetId in Set(assetIds) {
+                    try db.execute(
+                        sql: "DELETE FROM assets WHERE local_identifier = ?",
+                        arguments: [assetId]
+                    )
+                }
             }
+            return true
+        } catch {
+            return false
         }
     }
 
@@ -705,14 +729,20 @@ final class PhotoLibraryDatabase {
     }
 
     /// 任务动作落库（T12 动作执行后调用，供 Daily Inbox 统计）。
-    func markActionTaken(assetId: String, action: String, at date: Date = Date()) {
+    @discardableResult
+    func markActionTaken(assetId: String, action: String, at date: Date = Date()) -> Bool {
         let normalizedAction = action.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !assetId.isEmpty, !normalizedAction.isEmpty else { return }
-        try? writer.write { db in
-            try db.execute(
-                sql: "INSERT INTO action_events (asset_id, action, happened_at) VALUES (?, ?, ?)",
-                arguments: [assetId, normalizedAction, date.timeIntervalSince1970]
-            )
+        guard !assetId.isEmpty, !normalizedAction.isEmpty else { return false }
+        do {
+            try writer.write { db in
+                try db.execute(
+                    sql: "INSERT INTO action_events (asset_id, action, happened_at) VALUES (?, ?, ?)",
+                    arguments: [assetId, normalizedAction, date.timeIntervalSince1970]
+                )
+            }
+            return true
+        } catch {
+            return false
         }
     }
 
@@ -739,12 +769,18 @@ final class PhotoLibraryDatabase {
     }
 
     /// 丢弃非当前版本的特征行（ScanStateMachine.FEATURE_VERSION 变更后的脏数据清理）。
-    func purgeFeatureprints(keepingFeatureVersion version: Int) {
-        try? writer.write { db in
-            try db.execute(
-                sql: "DELETE FROM featureprints WHERE feature_version != ?",
-                arguments: [version]
-            )
+    @discardableResult
+    func purgeFeatureprints(keepingFeatureVersion version: Int) -> Bool {
+        do {
+            try writer.write { db in
+                try db.execute(
+                    sql: "DELETE FROM featureprints WHERE feature_version != ?",
+                    arguments: [version]
+                )
+            }
+            return true
+        } catch {
+            return false
         }
     }
 

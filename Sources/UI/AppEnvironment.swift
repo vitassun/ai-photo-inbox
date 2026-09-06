@@ -130,7 +130,9 @@ final class AppEnvironment: ObservableObject, PhotoLibraryChangeObserving {
     func photoLibraryDidChange(_ event: PhotoLibraryChangeEvent) {
         libraryRevision &+= 1
         if !event.removedIdentifiers.isEmpty {
-            database.removeAssetsFromLibrary(assetIds: event.removedIdentifiers)
+            if !database.removeAssetsFromLibrary(assetIds: event.removedIdentifiers) {
+                persistenceWarning = "相册删除变更未能保存到本地数据库；请检查存储空间后重试。"
+            }
             engine.purgeDeletedFromViews(assetIds: event.removedIdentifiers)
         }
 
