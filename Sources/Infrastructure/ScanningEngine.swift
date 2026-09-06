@@ -1195,7 +1195,7 @@ final class ScanningEngine: ScanningEngineProtocol {
                     ]),
                     featureVersion: ScanStateMachine.featureVersion,
                     computedAt: Date(),
-                    assetVersion: member.record.modificationDate
+                    assetVersion: member.modificationDate
                 ) else {
                     setPersistenceErrorOnQueue("评分保存失败，请检查存储空间后重试")
                     pauseForPersistenceFailureOnQueue()

@@ -787,6 +787,24 @@ final class PhotoLibraryDatabase {
         }
     }
 
+    /// 撤销用户在清理页做出的 keep 保护。调用方只在明确显示撤销入口时
+    /// 使用，自动裁决不会走这条路径。
+    @discardableResult
+    func removeDecision(assetId: String) -> Bool {
+        guard !assetId.isEmpty else { return false }
+        do {
+            try writer.write { db in
+                try db.execute(
+                    sql: "DELETE FROM decisions WHERE asset_id = ? AND verdict = 'keep'",
+                    arguments: [assetId]
+                )
+            }
+            return true
+        } catch {
+            return false
+        }
+    }
+
     // MARK: 辅助
 
     private static func writeAsset(

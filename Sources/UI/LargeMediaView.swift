@@ -103,7 +103,14 @@ struct LargeMediaView: View {
             get: { viewerAssetID.map { SingleAssetViewerContext(id: $0) } },
             set: { viewerAssetID = $0?.id }
         )) { context in
-            SinglePhotoViewer(localIdentifier: context.id) {
+            let record = candidates.first {
+                $0.record.localIdentifier == context.id
+            }?.record
+            SinglePhotoViewer(
+                localIdentifier: context.id,
+                mediaType: record?.mediaType ?? .image,
+                isLivePhoto: record?.isLivePhoto ?? false
+            ) {
                 viewerAssetID = nil
             }
         }
@@ -213,6 +220,8 @@ struct LargeMediaView: View {
                         .foregroundStyle(selected ? .red : .gray)
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel(selected ? "取消选择大媒体" : "选择大媒体")
+                .accessibilityValue(selected ? "已选中" : "未选中")
             }
         }
     }

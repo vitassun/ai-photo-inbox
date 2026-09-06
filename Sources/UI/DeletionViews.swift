@@ -24,6 +24,7 @@ struct DeletionReviewView: View {
     @State private var selectionSources: [String: DeletionSelectionSource] = [:]
     @State private var isDeleting = false
     @State private var statusText: String?
+    @State private var undoKeepID: String?
     @State private var viewerContext: ViewerContext?
     /// 删除回调异步返回时，页面也要立即从本地列表移除已消失成员，
     /// 避免继续显示已删除缩略图或把它们再次提交到系统确认框。
@@ -70,10 +71,16 @@ struct DeletionReviewView: View {
     var body: some View {
         VStack(spacing: 0) {
             if let statusText {
-                Text(statusText)
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                    .padding(8)
+                HStack(spacing: 8) {
+                    Text(statusText)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                    if undoKeepID != nil {
+                        Button("撤销保留") { undoKeep() }
+                            .font(.footnote.weight(.semibold))
+                    }
+                }
+                .padding(8)
             }
             if displayableGroups.isEmpty {
                 ContentUnavailableView(
@@ -230,6 +237,11 @@ struct DeletionReviewView: View {
                 }
                 .buttonStyle(.borderless)
                 .padding(4)
+                .accessibilityLabel(selected ? "取消选择照片" : "选择照片")
+                .accessibilityValue(selected ? "已选中" : "未选中")
+            }
+            .contextMenu {
+                Button("保留，不再建议") { keepFromSuggestions(id) }
             }
 
             HStack(spacing: 4) {
@@ -254,6 +266,40 @@ struct DeletionReviewView: View {
             selectedIDs.insert(id)
             selectionSources[id] = .user
         }
+    }
+
+    private func keepFromSuggestions(_ id: String) {
+        guard database.setDecision(
+            assetId: id,
+            verdict: .keep,
+            reason: "user_override",
+            decidedAt: Date()
+        ) else {
+            statusText = "保留操作未保存，请检查存储空间后重试。"
+            return
+        }
+        selectedIDs.remove(id)
+        selectionSources[id] = nil
+        undoKeepID = id
+        visibleCandidates = visibleCandidates.map { group in
+            ScoredGroup(
+                groupID: group.groupID,
+                reason: group.reason,
+                members: group.members,
+                preselectableIDs: group.preselectableIDs.filter { $0 != id }
+            )
+        }
+        statusText = "已保留这张照片，之后不会自动建议删除。"
+    }
+
+    private func undoKeep() {
+        guard let id = undoKeepID else { return }
+        guard database.removeDecision(assetId: id) else {
+            statusText = "撤销保留未保存，请检查存储空间后重试。"
+            return
+        }
+        undoKeepID = nil
+        statusText = "已撤销保留；下一次扫描会重新评估这张照片。"
     }
 
     private func shortGroupLabel(_ group: ScoredGroup) -> String {
@@ -394,7 +440,11 @@ struct GroupPhotoViewer: View {
 
             TabView(selection: $currentIndex) {
                 ForEach(Array(group.members.enumerated()), id: \.element.record.localIdentifier) { _, member in
-                    FullPhotoView(localIdentifier: member.record.localIdentifier)
+                    FullPhotoView(
+                        localIdentifier: member.record.localIdentifier,
+                        mediaType: member.record.mediaType,
+                        isLivePhoto: member.record.isLivePhoto
+                    )
                         .tag(group.members.firstIndex { $0.record.localIdentifier == member.record.localIdentifier } ?? 0)
                 }
             }
@@ -446,6 +496,8 @@ struct GroupPhotoViewer: View {
                     .foregroundStyle(selected ? .red : .accentColor)
             }
             .buttonStyle(.plain)
+            .accessibilityLabel(selected ? "取消选择此项" : "选择此项")
+            .accessibilityValue(selected ? "已选中" : "未选中")
         }
         .padding()
     }
@@ -454,56 +506,15 @@ struct GroupPhotoViewer: View {
 /// 单页大图：按屏幕级尺寸从 PhotoKit 拉取（只读，iCloud 未下载不触发下载）。
 struct FullPhotoView: View {
     let localIdentifier: String
-
-    @State private var image: UIImage?
-    @State private var failed = false
+    var mediaType: AssetMediaType = .image
+    var isLivePhoto = false
 
     var body: some View {
-        ZStack {
-            Color(.systemGray6)
-            if let image {
-                Image(uiImage: image)
-                    .resizable()
-                    .scaledToFit()
-            } else if failed {
-                Image(systemName: "photo.badge.exclamationmark")
-                    .font(.largeTitle)
-                    .foregroundStyle(.secondary)
-            } else {
-                ProgressView()
-            }
-        }
-        .onAppear(perform: load)
-    }
-
-    private func load() {
-        guard image == nil, !failed else { return }
-        DispatchQueue.global(qos: .userInitiated).async {
-            guard let asset = PHAsset.fetchAssets(
-                withLocalIdentifiers: [localIdentifier], options: nil
-            ).firstObject else {
-                DispatchQueue.main.async { self.failed = true }
-                return
-            }
-            let options = PHImageRequestOptions()
-            options.deliveryMode = .highQualityFormat
-            options.isNetworkAccessAllowed = false
-            options.isSynchronous = true
-            var delivered: UIImage?
-            PHImageManager.default().requestImage(
-                for: asset,
-                targetSize: CGSize(width: 1600, height: 1600),
-                contentMode: .aspectFit,
-                options: options
-            ) { img, _ in delivered = img }
-            DispatchQueue.main.async {
-                if let delivered {
-                    self.image = delivered
-                } else {
-                    self.failed = true
-                }
-            }
-        }
+        MediaPreviewView(
+            localIdentifier: localIdentifier,
+            mediaType: mediaType,
+            isLivePhoto: isLivePhoto
+        )
     }
 }
 

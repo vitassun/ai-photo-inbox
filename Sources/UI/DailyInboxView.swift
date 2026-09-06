@@ -190,6 +190,18 @@ struct DailyInboxView: View {
             // 扫描按钮
             scanButton
 
+            if environment.engine.state.isActive {
+                Button {
+                    environment.engine.pause()
+                    scanStatusText = "正在暂停…"
+                } label: {
+                    Label("暂停扫描", systemImage: "pause.circle")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+                .accessibilityHint("扫描会在当前资产或阶段边界暂停")
+            }
+
             // 扫描状态
             if let scanStatusText {
                 scanStatusView
@@ -210,7 +222,9 @@ struct DailyInboxView: View {
                 }
 
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("开始 / 继续扫描")
+                    Text(environment.engine.state == .paused
+                         ? "继续扫描"
+                         : "开始扫描")
                         .font(.subheadline.bold())
                         .foregroundStyle(.white)
                     Text("智能识别照片，快速整理")
@@ -422,6 +436,7 @@ struct DailyInboxView: View {
         authStatus = environment.photoLibraryService.authorizationStatus
         environment.startChangeMonitoringIfAuthorized()
         summary = environment.todaySummary()
+        isScanning = environment.engine.state.isActive
         if authStatus == .notDetermined && !accessPromptShown {
             accessPromptShown = true
             promptAccess()

@@ -208,6 +208,8 @@ struct LowQualityView: View {
                     }
                     .buttonStyle(.borderless)  // 独立触控目标，确保不被上层 onTapGesture 拦截
                     .padding(4)
+                    .accessibilityLabel(selected ? "取消选择低质量照片" : "选择低质量照片")
+                    .accessibilityValue(selected ? "已选中" : "未选中")
                 } else {
                     Image(systemName: "moon.stars.fill")
                         .font(.caption)
@@ -343,9 +345,8 @@ struct SingleAssetViewerContext: Identifiable {
 struct SinglePhotoViewer: View {
     let localIdentifier: String
     let onDismiss: () -> Void
-
-    @State private var image: UIImage?
-    @State private var failed = false
+    var mediaType: AssetMediaType = .image
+    var isLivePhoto = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -355,59 +356,13 @@ struct SinglePhotoViewer: View {
                     .padding()
             }
 
-            ZStack {
-                Color(.systemBackground)
-                if let image {
-                    Image(uiImage: image)
-                        .resizable()
-                        .scaledToFit()
-                        .padding()
-                } else if failed {
-                    VStack(spacing: 12) {
-                        Image(systemName: "photo.badge.exclamationmark")
-                            .font(.system(size: 60))
-                            .foregroundStyle(.secondary)
-                        Text("无法加载图片")
-                            .font(.headline)
-                            .foregroundStyle(.secondary)
-                    }
-                } else {
-                    ProgressView()
-                }
-            }
+            MediaPreviewView(
+                localIdentifier: localIdentifier,
+                mediaType: mediaType,
+                isLivePhoto: isLivePhoto
+            )
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .background(Color(.systemBackground))
-        .onAppear(perform: load)
-    }
-
-    private func load() {
-        guard image == nil, !failed else { return }
-        DispatchQueue.global(qos: .userInitiated).async {
-            guard let asset = PHAsset.fetchAssets(
-                withLocalIdentifiers: [localIdentifier], options: nil
-            ).firstObject else {
-                DispatchQueue.main.async { self.failed = true }
-                return
-            }
-            let options = PHImageRequestOptions()
-            options.deliveryMode = .highQualityFormat
-            options.isNetworkAccessAllowed = false
-            options.isSynchronous = true
-            var delivered: UIImage?
-            PHImageManager.default().requestImage(
-                for: asset,
-                targetSize: CGSize(width: 1600, height: 1600),
-                contentMode: .aspectFit,
-                options: options
-            ) { img, _ in delivered = img }
-            DispatchQueue.main.async {
-                if let img = delivered {
-                    self.image = img
-                } else {
-                    self.failed = true
-                }
-            }
-        }
     }
 }
