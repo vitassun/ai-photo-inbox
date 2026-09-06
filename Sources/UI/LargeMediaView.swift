@@ -16,6 +16,7 @@ struct LargeMediaView: View {
     @State private var selectionSources: [String: DeletionSelectionSource] = [:]
     @State private var isDeleting = false
     @State private var statusText: String?
+    @State private var undoKeepID: String?
     @State private var showOffloaded = false
     @State private var viewerAssetID: String?
 
@@ -112,10 +113,16 @@ struct LargeMediaView: View {
     @ViewBuilder
     private var statusBanner: some View {
         if let statusText {
-            Text(statusText)
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-                .padding(6)
+            HStack(spacing: 8) {
+                Text(statusText)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                if undoKeepID != nil {
+                    Button("撤销保留") { undoKeep() }
+                        .font(.footnote.weight(.semibold))
+                }
+            }
+            .padding(6)
         }
     }
 
@@ -242,6 +249,11 @@ struct LargeMediaView: View {
                 .accessibilityValue(selected ? "已选中" : "未选中")
             }
         }
+        .contextMenu {
+            if selectable {
+                Button("保留，不再建议") { keepFromSuggestions(id) }
+            }
+        }
     }
 
     private func mediaTitle(_ candidate: LargeMediaCandidate) -> String {
@@ -293,6 +305,35 @@ struct LargeMediaView: View {
             selectedIDs.insert(id)
             selectionSources[id] = .user
         }
+    }
+
+    private func keepFromSuggestions(_ id: String) {
+        guard environment.database.setDecision(
+            assetId: id,
+            verdict: .keep,
+            reason: "user_override",
+            decidedAt: Date()
+        ) else {
+            statusText = "保留操作未保存，请检查存储空间后重试。"
+            return
+        }
+        undoKeepID = id
+        selectedIDs.remove(id)
+        selectionSources[id] = nil
+        environment.engine.removeLargeMediaCandidates(assetIds: [id]) {
+            DispatchQueue.main.async { reload() }
+        }
+        statusText = "已保留这项大媒体，之后不会自动建议删除。"
+    }
+
+    private func undoKeep() {
+        guard let id = undoKeepID else { return }
+        guard environment.database.removeDecision(assetId: id) else {
+            statusText = "撤销保留未保存，请检查存储空间后重试。"
+            return
+        }
+        undoKeepID = nil
+        statusText = "已撤销保留；下一次扫描会重新评估这项大媒体。"
     }
 
     private func confirmDeletion() {

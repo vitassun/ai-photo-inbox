@@ -336,6 +336,20 @@ final class ScanningEngine: ScanningEngineProtocol {
         }
     }
 
+    /// 用户在大媒体页明确保留后，立即从当前镜像移出；撤销入口只撤销
+    /// keep 记录，下一轮扫描再重新评估，避免在本轮把结果偷偷加回来。
+    func removeLargeMediaCandidates(assetIds: [String], completion: (() -> Void)? = nil) {
+        workQueue.async { [weak self] in
+            guard let self else { return }
+            let removed = Set(assetIds)
+            self.snapshotLock.lock()
+            self.largeMediaSnapshot.removeAll { removed.contains($0.record.localIdentifier) }
+            self.snapshotLock.unlock()
+            _ = self.persistSnapshotsOnQueue()
+            completion?()
+        }
+    }
+
     /// 相册外部变更后的增量失效：更新快照元数据，清掉可能受收藏/编辑/分组
     /// 影响的分析视图，等待下一次扫描重建。扫描正在进行时不打断当前轮，
     /// 下一轮 fetching 会重新拉取全量元数据。

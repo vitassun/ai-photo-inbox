@@ -18,6 +18,7 @@ struct LowQualityView: View {
     @State private var selectionSources: [String: DeletionSelectionSource] = [:]
     @State private var isDeleting = false
     @State private var statusText: String?
+    @State private var undoKeepID: String?
     @State private var showExempted = false
     @State private var viewerAssetID: String?
 
@@ -47,10 +48,16 @@ struct LowQualityView: View {
     var body: some View {
         VStack(spacing: 0) {
             if let statusText {
-                Text(statusText)
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                    .padding(8)
+                HStack(spacing: 8) {
+                    Text(statusText)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                    if undoKeepID != nil {
+                        Button("撤销保留") { undoKeep() }
+                            .font(.footnote.weight(.semibold))
+                    }
+                }
+                .padding(8)
             }
             // 无安全建议时按钮置灰，仍明确提供“全选建议”入口。
             suggestionToggle
@@ -289,11 +296,22 @@ struct LowQualityView: View {
             statusText = "保留操作未保存，请检查存储空间后重试。"
             return
         }
+        undoKeepID = id
         selectedIDs.remove(id)
         selectionSources[id] = nil
         environment.engine.removeLowQualityCandidates(assetIds: [id]) {
             DispatchQueue.main.async { reload() }
         }
+    }
+
+    private func undoKeep() {
+        guard let id = undoKeepID else { return }
+        guard environment.database.removeDecision(assetId: id) else {
+            statusText = "撤销保留未保存，请检查存储空间后重试。"
+            return
+        }
+        undoKeepID = nil
+        statusText = "已撤销保留；下一次扫描会重新评估这张照片。"
     }
 
     private func confirmDeletion() {
