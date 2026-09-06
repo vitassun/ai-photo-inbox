@@ -9,6 +9,10 @@ enum AppConfig {
     /// 扫描循环的可让出批次，避免大相册长期占满工作队列。
     static let scanBatchSize = 100
 
+    /// 进度写入的最小变化量。内存进度仍按资产更新，但磁盘只在阶段边界、
+    /// 暂停和每约 2% 进度变化时落盘，避免五万张相册产生同量级状态写入。
+    static let scanProgressPersistenceStep = 0.02
+
     /// Vision 请求/特征提取实现版本。请求参数或模型语义改变时递增，
     /// 即使扫描算法版本不变也必须让旧缓存失效。
     static let visionRequestVersion = 1

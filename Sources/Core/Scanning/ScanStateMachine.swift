@@ -27,6 +27,7 @@ final class ScanStateMachine {
     private let store: KeyValueStore
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
+    private var lastPersistedProgress: Double?
 
     private(set) var phase: ScanPhase = .idle
     private(set) var progress: Double = 0
@@ -97,11 +98,11 @@ final class ScanStateMachine {
         guard isActive else { return }
         guard value.isFinite else {
             progress = 0
-            store.setString("0", forKey: Keys.progress)
+            persistProgressIfNeeded(force: true)
             return
         }
         progress = min(max(value, 0), 1)
-        store.setString(String(progress), forKey: Keys.progress)
+        persistProgressIfNeeded(force: progress == 0 || progress >= 1)
     }
 
     /// 手动重置到 idle（用于完成后的全新扫描）。
@@ -130,6 +131,7 @@ final class ScanStateMachine {
             // 全新安装或版本不符：丢弃旧进度，写入当前版本基线。
             phase = .idle
             progress = 0
+            lastPersistedProgress = 0
             store.setString(String(Self.featureVersion), forKey: Keys.version)
             store.setString(encode(.idle), forKey: Keys.phase)
             store.setString("0", forKey: Keys.progress)
@@ -145,12 +147,24 @@ final class ScanStateMachine {
         } else {
             progress = 0
         }
+        lastPersistedProgress = progress
     }
 
     private func persist() {
         store.setString(String(Self.featureVersion), forKey: Keys.version)
         store.setString(encode(phase), forKey: Keys.phase)
         store.setString(String(progress), forKey: Keys.progress)
+        lastPersistedProgress = progress
+    }
+
+    private func persistProgressIfNeeded(force: Bool) {
+        let shouldPersist = force
+            || lastPersistedProgress == nil
+            || abs(progress - (lastPersistedProgress ?? 0))
+                >= AppConfig.scanProgressPersistenceStep
+        guard shouldPersist else { return }
+        store.setString(String(progress), forKey: Keys.progress)
+        lastPersistedProgress = progress
     }
 
     private func encode(_ value: ScanPhase) -> String {
