@@ -296,7 +296,13 @@ final class ScanningEngineTests: XCTestCase {
         }
 
         // 新进程：loader 永远返回 nil（模拟图像不可得），只能靠复用已存哈希成组。
-        let fakeService = FakePhotoLibraryService(records: makeRecords(4))
+        let base = Date(timeIntervalSince1970: 1_700_000_000)
+        let fakeService = FakePhotoLibraryService(records: [
+            makeRecord(id: "asset-0", creationDate: base),
+            makeRecord(id: "asset-1", creationDate: base.addingTimeInterval(30)),
+            makeRecord(id: "asset-2", creationDate: base.addingTimeInterval(60)),
+            makeRecord(id: "asset-3", creationDate: base.addingTimeInterval(90)),
+        ])
         // fetching 完成时引擎会保存全量 AssetRecord；有这份基准才能证明
         // 已持久化哈希仍对应当前相册，并安全地在 hashing 断点复用它们。
         let encoder = JSONEncoder()
