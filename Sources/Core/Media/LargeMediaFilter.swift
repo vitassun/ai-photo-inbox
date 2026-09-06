@@ -30,7 +30,7 @@ enum LargeMediaFilter {
         idsInCandidateGroups: Set<String> = [],
         idsWithKeepDecision: Set<String> = []
     ) -> [LargeMediaCandidate] {
-        records.compactMap { record in
+        records.compactMap { record -> LargeMediaCandidate? in
             // 红线 1/2：收藏过、编辑过的资产永不进入任何预选集合。
             guard !record.favorite, !record.isEdited else { return nil }
             // 用户明确保留过的资产在重扫时也不得重新出现。
