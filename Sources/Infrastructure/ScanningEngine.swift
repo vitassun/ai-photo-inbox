@@ -964,9 +964,17 @@ final class ScanningEngine: ScanningEngineProtocol {
             hashByID[assetId] = hash
         }
 
+        var pendingWrites: [FeatureprintWrite] = []
         let total = max(fetchedRecords.count, 1)
         for (index, record) in fetchedRecords.enumerated() {
             if consumePauseRequest() {
+                guard flushFeatureprintWritesOnQueue(
+                    &pendingWrites,
+                    failureMessage: "特征保存失败，请检查存储空间后重试"
+                ) else {
+                    pauseForPersistenceFailureOnQueue()
+                    return false
+                }
                 machine.pause(reason: "用户暂停")
                 return false
             }
@@ -974,14 +982,19 @@ final class ScanningEngine: ScanningEngineProtocol {
                let data = imageDataLoader(record.localIdentifier),
                let hash = hashComputer(data) {
                 hashByID[record.localIdentifier] = hash
-                guard database.upsertFeatureprint(
+                pendingWrites.append(FeatureprintWrite(
                     assetId: record.localIdentifier,
                     data: FeaturePrintCodec.encodeHash(hash),
                     featureVersion: ScanStateMachine.featureVersion,
                     computedAt: Date(),
                     assetVersion: record.modificationDate
+                ))
+            }
+            if pendingWrites.count >= AppConfig.scanBatchSize {
+                guard flushFeatureprintWritesOnQueue(
+                    &pendingWrites,
+                    failureMessage: "特征保存失败，请检查存储空间后重试"
                 ) else {
-                    setPersistenceErrorOnQueue("特征保存失败，请检查存储空间后重试")
                     pauseForPersistenceFailureOnQueue()
                     return false
                 }
@@ -993,6 +1006,13 @@ final class ScanningEngine: ScanningEngineProtocol {
                 reportProgress()
             }
             yieldAfterBatchIfNeeded(index: index)
+        }
+        guard flushFeatureprintWritesOnQueue(
+            &pendingWrites,
+            failureMessage: "特征保存失败，请检查存储空间后重试"
+        ) else {
+            pauseForPersistenceFailureOnQueue()
+            return false
         }
 
         let groups = CandidateGrouper.groups(from: fetchedRecords, hashByID: hashByID)
@@ -1016,10 +1036,18 @@ final class ScanningEngine: ScanningEngineProtocol {
 
         let claimed = Set(candidateGroupsOnQueue().flatMap(\.memberIDs))
         let pending = fetchedRecords.filter { !claimed.contains($0.localIdentifier) }
+        var pendingWrites: [FeatureprintWrite] = []
         let total = max(pending.count, 1)
 
         for (index, record) in pending.enumerated() {
             if consumePauseRequest() {
+                guard flushFeatureprintWritesOnQueue(
+                    &pendingWrites,
+                    failureMessage: "特征保存失败，请检查存储空间后重试"
+                ) else {
+                    pauseForPersistenceFailureOnQueue()
+                    return false
+                }
                 machine.pause(reason: "用户暂停")
                 return false
             }
@@ -1029,17 +1057,22 @@ final class ScanningEngine: ScanningEngineProtocol {
                 let vector = EmbeddingMath.normalized(rawVector)
                 if EmbeddingMath.isUsable(vector) {
                     embeddingByID[record.localIdentifier] = vector
-                    guard database.upsertFeatureprint(
+                    pendingWrites.append(FeatureprintWrite(
                         assetId: record.localIdentifier,
                         data: FeaturePrintCodec.encodeEmbedding(vector),
                         featureVersion: ScanStateMachine.featureVersion,
                         computedAt: Date(),
                         assetVersion: record.modificationDate
-                    ) else {
-                        setPersistenceErrorOnQueue("特征保存失败，请检查存储空间后重试")
-                        pauseForPersistenceFailureOnQueue()
-                        return false
-                    }
+                    ))
+                }
+            }
+            if pendingWrites.count >= AppConfig.scanBatchSize {
+                guard flushFeatureprintWritesOnQueue(
+                    &pendingWrites,
+                    failureMessage: "特征保存失败，请检查存储空间后重试"
+                ) else {
+                    pauseForPersistenceFailureOnQueue()
+                    return false
                 }
             }
             throttleForThermalPressure()
@@ -1049,6 +1082,14 @@ final class ScanningEngine: ScanningEngineProtocol {
                 reportProgress()
             }
             yieldAfterBatchIfNeeded(index: index)
+        }
+
+        guard flushFeatureprintWritesOnQueue(
+            &pendingWrites,
+            failureMessage: "特征保存失败，请检查存储空间后重试"
+        ) else {
+            pauseForPersistenceFailureOnQueue()
+            return false
         }
 
         machine.advance()
@@ -1415,6 +1456,19 @@ final class ScanningEngine: ScanningEngineProtocol {
         // 工作队列上的阶段仍保持串行，但在批次边界主动让出一个调度片段，
         // 让暂停/相册变更通知能在大库扫描中及时排队。
         Thread.sleep(forTimeInterval: 0.001)
+    }
+
+    private func flushFeatureprintWritesOnQueue(
+        _ writes: inout [FeatureprintWrite],
+        failureMessage: String
+    ) -> Bool {
+        guard !writes.isEmpty else { return true }
+        let success = database.upsertFeatureprints(writes)
+        writes.removeAll(keepingCapacity: true)
+        if !success {
+            setPersistenceErrorOnQueue(failureMessage)
+        }
+        return success
     }
 
     /// workQueue 内部读取快照的统一入口，避免与 UI/删除回调并发时数据竞争。

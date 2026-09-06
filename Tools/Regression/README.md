@@ -25,9 +25,11 @@ python3 Tools/Regression/run_regression.py Tools/Regression/dataset
 ```
 
 脚本读取 `embeddings.csv` 与目录结构，对候选阈值扫描并输出每个阈值下的
-**组级 purity**、**应拆组误并率**、**应并组漏拆率**，给出达标区间
-（purity ≥ 0.9 且误并 ≤ 10% 为 T05 验收线）。把选定值连同本次报告摘要
-追加进 `threshold-log.md`，再同步改 `AppConfig`。
+**组级 purity**、**应拆组误并率**、**应并组漏拆率**，给出达标区间。
+三项都必须达到门槛（purity ≥ 0.90、误并率 ≤ 10%、漏拆率 ≤ 10%）；
+全部单例和全部合并会被固定判为失败。脚本还会拒绝重复标注 ID、缺向量、
+额外向量和维度不一致的数据。没有达标阈值时以失败状态退出。把选定值连同
+本次报告摘要追加进 `threshold-log.md`，再同步改 `AppConfig`。
 
 ## embeddings.csv 从哪来
 
