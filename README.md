@@ -104,17 +104,22 @@ V1 自用/内测不需要 $99/年 的开发者账号：
 
 ## 任务卡对照
 
-> 权威任务索引（含规模/依赖，T01–T14）见 `../tasks/README.md`；本表只标本仓库骨架落点。
+权威任务索引（规模与依赖）见 `../tasks/README.md`。下面记录当前源码落点和验收边界，
+避免把旧的“骨架已完成”描述当成产品验收结论。
 
-| 卡 | 内容 | 骨架落点 |
+| 卡 | 当前落点 | 验收边界 |
 |---|---|---|
-| T01 | 项目骨架与 CI 绿灯 | project.yml / .github/workflows/ios.yml / 全部测试 |
-| T02 | 授权与资产拉取层（含变更监听） | Infrastructure/SystemPhotoLibraryService.swift |
-| T03 | 扫描状态机接入真实管线 + GRDB 持久化 | ScanningEngine + PhotoLibraryDatabase |
-| T04 | 时间地理分桶 + pHash 粗筛 | Core/Grouping/* + Infrastructure/PerceptualHash.swift |
-| T05 | FeaturePrint 聚类 + 阈值回归集 | Infrastructure/VisionAnalysisService.swift + Tools/Regression |
-| T06 | 低质量检测 DSP + EXIF 夜间白名单 | Core/Quality/ImageQualityDSP.swift |
-| T07 | 大媒体估算模型 + LivePhoto 配对 | Core/Media/* |
-| T08 | Best Shot 特征整合（人脸/显著性/美学） | VisionAnalysisService + ScanningEngine scoring |
-| T09 | 保留分引擎接线 + SafetyRules 集成 | GroupScoring + SafetyRules |
-| T10 | 安全删除流（确认框/批量 UI/教育页） | DeletionCoordinator + SystemPhotoLibraryService |
+| T01 | `project.yml`、`.github/workflows/ios.yml` | CI 生成工程、模拟器测试、未签名设备构建 |
+| T02 | `SystemPhotoLibraryService`、`PhotoLibraryChangeMonitor` | 权限和 PhotoKit 变更监听需真机复核 |
+| T03 | `ScanningEngine`、`PhotoLibraryDatabase` | 断点恢复、原子快照和数据库错误有 CI 覆盖 |
+| T04 | `TimeBucketizer`、`CandidateGrouper`、`PerceptualHash` | 窗口上限和边界召回有单测 |
+| T05 | `VisionAnalysisService`、`Tools/Regression` | 使用本地标注集校准，数据不入 Git |
+| T06 | `ImageQualityDSP`、夜景白名单 | 低质量批量页可用，阈值仍需真实校准集复核 |
+| T07 | `MediaSizeEstimator`、`LargeMediaFilter` | 视频/Live Photo 的系统行为需真机复核 |
+| T08 | `VisionAnalysisService`、扫描评分阶段 | Best Shot 只作为替代证据，不绕过安全规则 |
+| T09 | `GroupScoring`、`SafetyRules` | 收藏、编辑、唯一资产和用户保留永不自动预选 |
+| T10 | `DeletionCoordinator`、`SystemPhotoLibraryService` | 每批删除均经系统确认，取消和失败按 ID 回传 |
+| T11–T13 | OCR/动作执行器、受门闩保护的 LLM 基础设施 | 云端入口暂隐藏；本地规则路径持续可用 |
+| T14–T15 | `DailyInboxView`、截图收件箱和本地动作 | 通知、相册权限和后台恢复需真机复核 |
+| T16–T17 | `LowQualityView`、`LargeMediaView` | 三态本机可用性，未下载/未知不计入可释放空间 |
+| T18 | `SettingsView`、`CloudConsent` | 设置页不展示未接通的云端开关，同意门闩保留给后续接入 |

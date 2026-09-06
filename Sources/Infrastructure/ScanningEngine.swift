@@ -444,8 +444,7 @@ final class ScanningEngine: ScanningEngineProtocol {
                 break
             }
             // idle（全新/复位后）清掉非当前版本与旧轮次的特征数据；
-            // 当前实现没有资产内容版本，无法证明同一 id 的内容未变，
-            // 因而全量重扫必须重新计算。
+            // 全量重扫仍清理旧缓存，避免一次完整重建把旧裁决带入新轮次。
             if self.machine.phase == .idle {
                 if self.store.string(forKey: SnapshotKeys.round) == nil {
                     self.beginNewSnapshotRoundOnQueue()
