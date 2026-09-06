@@ -180,6 +180,7 @@ final class GroupScoringTests: XCTestCase {
         // 作为可自动删除项，否则整条链可能在逐次删除后失去替代品。
         let result = GroupScoring.preselectableIDs(
             for: scoredMembers,
+            hashByID: [:],
             embeddingByID: [
                 "a": [1, 0],
                 "b": [0.98, 0.2],
