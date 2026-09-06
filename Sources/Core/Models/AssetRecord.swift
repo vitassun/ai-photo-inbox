@@ -13,6 +13,16 @@ enum AssetMediaType: Int, Codable, Equatable {
     case audio = 3
 }
 
+/// Whether the original bytes are known to be on this device. Unknown is
+/// distinct from an iCloud-offloaded asset and is never treated as releasable.
+enum AssetLocalAvailability: String, Codable, Equatable {
+    case available
+    case notDownloaded
+    case unknown
+
+    var isAvailable: Bool { self == .available }
+}
+
 /// 一张照片/视频在扫描时刻的快照。
 struct AssetRecord: Codable, Equatable {
     /// PHAsset.localIdentifier 原样透传；纯逻辑层只当不透明字符串用。
@@ -42,7 +52,11 @@ struct AssetRecord: Codable, Equatable {
     let longitude: Double?
     /// 原件是否在本机（iCloud 未下载 = false）。T17 大媒体页折叠分组依据；
     /// assets 表同名列的内存来源，适配层从 PHAsset.locallyAvailable 填充。
-    var locallyAvailable: Bool = true
+    let localAvailability: AssetLocalAvailability
+
+    /// Compatibility read for existing callers. New code should inspect the
+    /// tri-state value so unknown is not mistaken for a confirmed offload.
+    var locallyAvailable: Bool { localAvailability.isAvailable }
 
     init(
         localIdentifier: String,
@@ -58,7 +72,8 @@ struct AssetRecord: Codable, Equatable {
         isLivePhoto: Bool,
         latitude: Double?,
         longitude: Double?,
-        locallyAvailable: Bool = true
+        locallyAvailable: Bool = true,
+        localAvailability: AssetLocalAvailability? = nil
     ) {
         self.localIdentifier = localIdentifier
         self.favorite = favorite
@@ -73,13 +88,14 @@ struct AssetRecord: Codable, Equatable {
         self.isLivePhoto = isLivePhoto
         self.latitude = latitude
         self.longitude = longitude
-        self.locallyAvailable = locallyAvailable
+        self.localAvailability = localAvailability
+            ?? (locallyAvailable ? .available : .notDownloaded)
     }
 
     private enum CodingKeys: String, CodingKey {
         case localIdentifier, favorite, isEdited, mediaType, pixelWidth,
              pixelHeight, duration, creationDate, modificationDate,
-             isScreenshot, isLivePhoto, locallyAvailable
+             isScreenshot, isLivePhoto, localAvailability, locallyAvailable
     }
 
     init(from decoder: Decoder) throws {
@@ -98,7 +114,12 @@ struct AssetRecord: Codable, Equatable {
         // GPS 是当前轮次分组所需的内存字段，任何 Codable 持久化都排除它。
         latitude = nil
         longitude = nil
-        locallyAvailable = try container.decodeIfPresent(Bool.self, forKey: .locallyAvailable) ?? true
+        if let value = try container.decodeIfPresent(AssetLocalAvailability.self, forKey: .localAvailability) {
+            localAvailability = value
+        } else {
+            let legacy = try container.decodeIfPresent(Bool.self, forKey: .locallyAvailable)
+            localAvailability = legacy == false ? .notDownloaded : .available
+        }
     }
 
     func encode(to encoder: Encoder) throws {
@@ -114,6 +135,8 @@ struct AssetRecord: Codable, Equatable {
         try container.encodeIfPresent(modificationDate, forKey: .modificationDate)
         try container.encode(isScreenshot, forKey: .isScreenshot)
         try container.encode(isLivePhoto, forKey: .isLivePhoto)
+        try container.encode(localAvailability, forKey: .localAvailability)
+        // Keep one migration-friendly boolean for snapshots produced by older builds.
         try container.encode(locallyAvailable, forKey: .locallyAvailable)
     }
 

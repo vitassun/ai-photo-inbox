@@ -117,6 +117,88 @@ final class DeletionFlowTests: XCTestCase {
         XCTAssertEqual(completed.count, 3)
     }
 
+    func testPreflightKeepsAChosenSuggestionEligible() throws {
+        let database = try PhotoLibraryDatabase.inMemory()
+        let modification = Date(timeIntervalSince1970: 1_700_000_000)
+        let best = AssetRecord(
+            localIdentifier: "best", favorite: false, isEdited: false,
+            mediaType: .image, pixelWidth: 100, pixelHeight: 100, duration: 0,
+            creationDate: modification, modificationDate: modification,
+            isScreenshot: false, isLivePhoto: false, latitude: nil, longitude: nil
+        )
+        let candidate = AssetRecord(
+            localIdentifier: "candidate", favorite: false, isEdited: false,
+            mediaType: .image, pixelWidth: 100, pixelHeight: 100, duration: 0,
+            creationDate: modification, modificationDate: modification,
+            isScreenshot: false, isLivePhoto: false, latitude: nil, longitude: nil
+        )
+        XCTAssertTrue(database.upsert(assets: [best, candidate], fetchedAt: Date()))
+        XCTAssertTrue(database.upsertFeatureprint(
+            assetId: best.localIdentifier,
+            data: FeaturePrintCodec.encodeHash(String(repeating: "a", count: 16)),
+            featureVersion: ScanStateMachine.featureVersion,
+            computedAt: Date(),
+            assetVersion: modification
+        ))
+        XCTAssertTrue(database.upsertFeatureprint(
+            assetId: candidate.localIdentifier,
+            data: FeaturePrintCodec.encodeHash(String(repeating: "a", count: 16)),
+            featureVersion: ScanStateMachine.featureVersion,
+            computedAt: Date(),
+            assetVersion: modification
+        ))
+
+        let scored = ScoredGroup(
+            groupID: "g",
+            reason: "test",
+            members: [
+                ScoredMember(record: best, score: 1, isBestShot: true),
+                ScoredMember(record: candidate, score: 0, isBestShot: false),
+            ],
+            preselectableIDs: [candidate.localIdentifier]
+        )
+        let coordinator = DeletionCoordinator(
+            photoLibrary: FakePhotoLibraryService(records: [best, candidate]),
+            database: database
+        )
+
+        let result = coordinator.preflight(
+            selections: [DeletionSelection(assetID: candidate.localIdentifier, source: .suggestion)],
+            groups: [scored]
+        )
+        XCTAssertEqual(result.approvedIDs, [candidate.localIdentifier])
+        XCTAssertTrue(result.blocked.isEmpty)
+    }
+
+    func testRequestResultDoesNotInferApprovalFromMissingAssets() {
+        let result = DeletionRequestResult(batches: [
+            DeletionBatchResult(
+                batchIndex: 0,
+                requestedIDs: ["a", "b"],
+                approvedIDs: ["a"],
+                status: .approved,
+                reason: nil
+            ),
+            DeletionBatchResult(
+                batchIndex: 1,
+                requestedIDs: ["c"],
+                approvedIDs: [],
+                status: .cancelled,
+                reason: "用户取消"
+            ),
+            DeletionBatchResult(
+                batchIndex: 2,
+                requestedIDs: ["d"],
+                approvedIDs: [],
+                status: .skipped,
+                reason: "前一批次未完成"
+            ),
+        ])
+        XCTAssertEqual(result.approvedIDs, ["a"])
+        XCTAssertTrue(result.cancelled)
+        XCTAssertFalse(result.hasFailure)
+    }
+
     // MARK: verdicts 落库 + 组视图刷新
 
     func testMarkDeletedWritesVerdictsForSurvivingRows() throws {

@@ -34,11 +34,48 @@ struct PHAssetSnapshot {
     let isScreenshot: Bool
     /// 是否 Live Photo（.photoLive 子类型；删除须原子处理，见 T07/T10）。
     let isLivePhoto: Bool
-    /// 原件是否在本机（T17：iCloud 未下载折叠分组依据）。
+    /// 原件是否在本机。未知状态不会计入可释放空间。
+    let localAvailability: AssetLocalAvailability
+    /// Legacy boolean retained for source compatibility with test fixtures.
     let locallyAvailable: Bool
     /// 拍摄地坐标（度）；资产无 GPS 信息时为 nil。仅扫描当轮内存使用，不落库。
     let latitude: Double?
     let longitude: Double?
+
+    init(
+        localIdentifier: String,
+        favorite: Bool,
+        isEdited: Bool,
+        mediaTypeRaw: Int,
+        pixelWidth: Int,
+        pixelHeight: Int,
+        duration: Double,
+        creationDate: Date?,
+        modificationDate: Date?,
+        isScreenshot: Bool,
+        isLivePhoto: Bool,
+        locallyAvailable: Bool = true,
+        latitude: Double?,
+        longitude: Double?,
+        localAvailability: AssetLocalAvailability? = nil
+    ) {
+        self.localIdentifier = localIdentifier
+        self.favorite = favorite
+        self.isEdited = isEdited
+        self.mediaTypeRaw = mediaTypeRaw
+        self.pixelWidth = pixelWidth
+        self.pixelHeight = pixelHeight
+        self.duration = duration
+        self.creationDate = creationDate
+        self.modificationDate = modificationDate
+        self.isScreenshot = isScreenshot
+        self.isLivePhoto = isLivePhoto
+        self.localAvailability = localAvailability
+            ?? (locallyAvailable ? .available : .notDownloaded)
+        self.locallyAvailable = locallyAvailable
+        self.latitude = latitude
+        self.longitude = longitude
+    }
 
     /// 纯函数：快照 → AssetRecord。creationDate 为 nil 时回退 modificationDate
     /// （该回退策略全仓只允许出现在这一处，见任务卡 T02 边界）；
@@ -74,7 +111,7 @@ struct PHAssetSnapshot {
             isLivePhoto: isLivePhoto,
             latitude: safeLatitude,
             longitude: safeLongitude,
-            locallyAvailable: locallyAvailable
+            localAvailability: localAvailability
         )
     }
 }
@@ -93,7 +130,9 @@ extension PHAssetSnapshot {
         modificationDate = phAsset.modificationDate
         isScreenshot = phAsset.mediaSubtypes.contains(.photoScreenshot)
         isLivePhoto = phAsset.mediaSubtypes.contains(.photoLive)
-        locallyAvailable = Self.isLocallyAvailable(phAsset)
+        let availability = Self.localAvailability(of: phAsset)
+        localAvailability = availability
+        locallyAvailable = availability == .available
         if let coordinate = phAsset.location?.coordinate {
             latitude = coordinate.latitude
             longitude = coordinate.longitude
@@ -103,23 +142,30 @@ extension PHAssetSnapshot {
         }
     }
 
-    /// 原件是否在本机（T17：iCloud 未下载折叠分组依据）。
-    /// PHAsset 无公开"原件在本机"API（与 §1.4 文件大小同源的约束域）；
-    /// 经 PHAssetResource 的运行时只读属性探测，任何异常一律保守回退
-    /// "本机可用"——宁可少折叠，不可把可清理项误标成未下载而隐藏。
-    /// 只读探测，无任何写入，不做体积读取（KVC 取 fileSize 的否决不适用）。
-    private static func isLocallyAvailable(_ asset: PHAsset) -> Bool {
-        let resources = PHAssetResource.assetResources(for: asset)
-        guard !resources.isEmpty else { return true }
-        return resources.allSatisfy { resource in
-            // `locallyAvailable` is not a documented PHAssetResource property on
-            // every iOS release. Check the getter before using KVC so an older
-            // runtime cannot raise NSUndefinedKeyException. Unknown resources
-            // are treated as available: hiding a deletable item is worse than
-            // showing it with an estimate that the user can verify.
-            guard resource.responds(to: Selector(("locallyAvailable"))) else { return true }
-            return (resource.value(forKey: "locallyAvailable") as? Bool) ?? true
+    /// Public, no-network probe for still images. The request's info dictionary
+    /// distinguishes an iCloud miss from a delivered local image; video and
+    /// unusual resource types remain unknown until a dedicated media request.
+    private static func localAvailability(of asset: PHAsset) -> AssetLocalAvailability {
+        guard !Thread.isMainThread, asset.mediaType == .image else { return .unknown }
+        let options = PHImageRequestOptions()
+        options.deliveryMode = .fastFormat
+        options.resizeMode = .fast
+        options.isNetworkAccessAllowed = false
+        options.isSynchronous = true
+        var result: AssetLocalAvailability = .unknown
+        PHImageManager.default().requestImage(
+            for: asset,
+            targetSize: CGSize(width: 1, height: 1),
+            contentMode: .aspectFit,
+            options: options
+        ) { image, info in
+            if (info?[PHImageResultIsInCloudKey] as? Bool) == true {
+                result = .notDownloaded
+            } else if image != nil {
+                result = .available
+            }
         }
+        return result
     }
 }
 

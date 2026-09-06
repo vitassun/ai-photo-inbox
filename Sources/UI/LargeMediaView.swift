@@ -62,16 +62,43 @@ struct LargeMediaView: View {
     }
 
     var body: some View {
+        content
+            .navigationTitle("大媒体清理")
+            .toolbar(.hidden, for: .tabBar)
+            .toolbarColorScheme(.dark, for: .navigationBar)
+            .background(Theme.backgroundGradient.ignoresSafeArea())
+            .onAppear {
+                tabBarState.isHidden = true
+                reload()
+            }
+            .onDisappear { tabBarState.isHidden = false }
+            .onChange(of: scenePhase) { phase in
+                if phase == .active { reload() }
+            }
+            .onChange(of: environment.libraryRevision) { _ in
+                reload()
+            }
+            .fullScreenCover(item: Binding(
+                get: { viewerAssetID.map { SingleAssetViewerContext(id: $0) } },
+                set: { viewerAssetID = $0?.id }
+            )) { context in
+                let record = recordForViewer(id: context.id)
+                SinglePhotoViewer(
+                    localIdentifier: context.id,
+                    mediaType: record?.mediaType ?? .image,
+                    isLivePhoto: record?.isLivePhoto ?? false
+                ) {
+                    viewerAssetID = nil
+                }
+            }
+    }
+
+    private var content: some View {
         VStack(spacing: 0) {
             // 无安全建议时按钮置灰，仍明确提供“全选建议”入口。
             suggestionToggle
             summaryHeader
-            if let statusText {
-                Text(statusText)
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                    .padding(6)
-            }
+            statusBanner
             if candidates.isEmpty {
                 ContentUnavailableView(
                     "没有占空间的大文件",
@@ -84,33 +111,15 @@ struct LargeMediaView: View {
                 deleteBar
             }
         }
-        .navigationTitle("大媒体清理")
-        .toolbar(.hidden, for: .tabBar)
-        .toolbarColorScheme(.dark, for: .navigationBar)
-        .background(Theme.backgroundGradient.ignoresSafeArea())
-        .onAppear {
-            tabBarState.isHidden = true
-            reload()
-        }
-        .onDisappear { tabBarState.isHidden = false }
-        .onChange(of: scenePhase) { phase in
-            if phase == .active { reload() }
-        }
-        .onChange(of: environment.libraryRevision) { _ in
-            reload()
-        }
-        .fullScreenCover(item: Binding(
-            get: { viewerAssetID.map { SingleAssetViewerContext(id: $0) } },
-            set: { viewerAssetID = $0?.id }
-        )) { context in
-            let record = recordForViewer(id: context.id)
-            SinglePhotoViewer(
-                localIdentifier: context.id,
-                mediaType: record?.mediaType ?? .image,
-                isLivePhoto: record?.isLivePhoto ?? false
-            ) {
-                viewerAssetID = nil
-            }
+    }
+
+    @ViewBuilder
+    private var statusBanner: some View {
+        if let statusText {
+            Text(statusText)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .padding(6)
         }
     }
 

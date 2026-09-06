@@ -158,6 +158,12 @@ final class PhotoLibraryDatabase {
             "ALTER TABLE featureprints ADD COLUMN vision_request_version INTEGER NOT NULL DEFAULT 1",
             "CREATE INDEX IF NOT EXISTS idx_featureprints_freshness ON featureprints(feature_version, vision_request_version, asset_version)",
         ]),
+        // v6：保留三态的本机可用性；旧布尔列继续保留给旧版本读取。
+        (name: "v6.assetAvailabilityState", statements: [
+            "ALTER TABLE assets ADD COLUMN availability_state TEXT NOT NULL DEFAULT 'available'",
+            "UPDATE assets SET availability_state = CASE WHEN locally_available = 1 THEN 'available' ELSE 'notDownloaded' END",
+            "CREATE INDEX IF NOT EXISTS idx_assets_availability ON assets(availability_state)",
+        ]),
     ]
 
     static func makeMigrator(steps: [(name: String, statements: [String])] = migrationSteps) -> DatabaseMigrator {
@@ -261,17 +267,20 @@ final class PhotoLibraryDatabase {
         asset record: AssetRecord,
         fetchedAt: Date,
         locallyAvailable: Bool? = nil,
+        localAvailability: AssetLocalAvailability? = nil,
         estimatedBytes: Int64? = nil
     ) -> Bool {
         guard !record.localIdentifier.isEmpty else { return false }
-        let availability = locallyAvailable ?? record.locallyAvailable
+        let availability = localAvailability
+            ?? locallyAvailable.map { $0 ? .available : .notDownloaded }
+            ?? record.localAvailability
         do {
             try writer.write { db in
                 try Self.writeAsset(
                     db: db,
                     record: record,
                     fetchedAt: fetchedAt,
-                    locallyAvailable: availability,
+                    localAvailability: availability,
                     estimatedBytes: estimatedBytes
                 )
             }
@@ -285,19 +294,19 @@ final class PhotoLibraryDatabase {
     /// 5 万次独立提交。单资产 upsert 仍保留给 PhotoKit 增量事件和测试调用。
     @discardableResult
     func upsert(assets records: [AssetRecord], fetchedAt: Date) -> Bool {
-        let inputs = records.compactMap { record -> (AssetRecord, Bool, Int64?)? in
+        let inputs = records.compactMap { record -> (AssetRecord, AssetLocalAvailability, Int64?)? in
             guard !record.localIdentifier.isEmpty else { return nil }
-            return (record, record.locallyAvailable, MediaSizeEstimator.estimatedBytes(for: record))
+            return (record, record.localAvailability, MediaSizeEstimator.estimatedBytes(for: record))
         }
         guard !inputs.isEmpty else { return true }
         do {
             try writer.write { db in
-                for (record, locallyAvailable, estimatedBytes) in inputs {
+                for (record, localAvailability, estimatedBytes) in inputs {
                     try Self.writeAsset(
                         db: db,
                         record: record,
                         fetchedAt: fetchedAt,
-                        locallyAvailable: locallyAvailable,
+                        localAvailability: localAvailability,
                         estimatedBytes: estimatedBytes
                     )
                 }
@@ -313,19 +322,19 @@ final class PhotoLibraryDatabase {
     /// 增量变更不能调用此方法（应使用 upsert + removeAssetsFromLibrary）。
     @discardableResult
     func replaceAssetSnapshot(_ records: [AssetRecord], fetchedAt: Date) -> Bool {
-        let inputs = records.compactMap { record -> (AssetRecord, Bool, Int64?)? in
+        let inputs = records.compactMap { record -> (AssetRecord, AssetLocalAvailability, Int64?)? in
             guard !record.localIdentifier.isEmpty else { return nil }
-            return (record, record.locallyAvailable, MediaSizeEstimator.estimatedBytes(for: record))
+            return (record, record.localAvailability, MediaSizeEstimator.estimatedBytes(for: record))
         }
         let incomingIDs = Set(inputs.map { $0.0.localIdentifier })
         do {
             try writer.write { db in
-                for (record, locallyAvailable, estimatedBytes) in inputs {
+                for (record, localAvailability, estimatedBytes) in inputs {
                     try Self.writeAsset(
                         db: db,
                         record: record,
                         fetchedAt: fetchedAt,
-                        locallyAvailable: locallyAvailable,
+                        localAvailability: localAvailability,
                         estimatedBytes: estimatedBytes
                     )
                 }
@@ -811,7 +820,7 @@ final class PhotoLibraryDatabase {
         db: Database,
         record: AssetRecord,
         fetchedAt: Date,
-        locallyAvailable: Bool,
+        localAvailability: AssetLocalAvailability,
         estimatedBytes: Int64?
     ) throws {
         let width = max(0, record.pixelWidth)
@@ -835,8 +844,8 @@ final class PhotoLibraryDatabase {
               local_identifier, favorite, is_edited, media_type,
               pixel_width, pixel_height, duration_seconds, creation_date,
               modification_date, is_screenshot, burst_id, estimated_bytes,
-              locally_available, fetched_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              locally_available, availability_state, fetched_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(local_identifier) DO UPDATE SET
               favorite = excluded.favorite,
               is_edited = excluded.is_edited,
@@ -847,8 +856,9 @@ final class PhotoLibraryDatabase {
               creation_date = excluded.creation_date,
               modification_date = excluded.modification_date,
               is_screenshot = excluded.is_screenshot,
-              estimated_bytes = excluded.estimated_bytes,
-              locally_available = excluded.locally_available,
+               estimated_bytes = excluded.estimated_bytes,
+               availability_state = excluded.availability_state,
+               locally_available = excluded.locally_available,
               fetched_at = excluded.fetched_at
             """,
             arguments: [
@@ -864,7 +874,8 @@ final class PhotoLibraryDatabase {
                 record.isScreenshot,
                 nil as String?,
                 safeEstimatedBytes,
-                locallyAvailable,
+                localAvailability.isAvailable,
+                localAvailability.rawValue,
                 safeFetchedTimestamp,
             ]
         )

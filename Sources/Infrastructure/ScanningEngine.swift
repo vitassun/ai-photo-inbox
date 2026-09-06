@@ -27,7 +27,7 @@ private struct PersistedAssetRecord: Codable, Equatable {
     let modificationDate: Date?
     let isScreenshot: Bool
     let isLivePhoto: Bool
-    let locallyAvailable: Bool
+    let localAvailability: AssetLocalAvailability
 
     init(_ record: AssetRecord) {
         localIdentifier = record.localIdentifier
@@ -41,7 +41,51 @@ private struct PersistedAssetRecord: Codable, Equatable {
         modificationDate = record.modificationDate
         isScreenshot = record.isScreenshot
         isLivePhoto = record.isLivePhoto
-        locallyAvailable = record.locallyAvailable
+        localAvailability = record.localAvailability
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case localIdentifier, favorite, isEdited, mediaType, pixelWidth,
+             pixelHeight, duration, creationDate, modificationDate,
+             isScreenshot, isLivePhoto, localAvailability, locallyAvailable
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        localIdentifier = try container.decode(String.self, forKey: .localIdentifier)
+        favorite = try container.decode(Bool.self, forKey: .favorite)
+        isEdited = try container.decode(Bool.self, forKey: .isEdited)
+        mediaType = try container.decode(AssetMediaType.self, forKey: .mediaType)
+        pixelWidth = try container.decode(Int.self, forKey: .pixelWidth)
+        pixelHeight = try container.decode(Int.self, forKey: .pixelHeight)
+        duration = try container.decode(Double.self, forKey: .duration)
+        creationDate = try container.decodeIfPresent(Date.self, forKey: .creationDate)
+        modificationDate = try container.decodeIfPresent(Date.self, forKey: .modificationDate)
+        isScreenshot = try container.decode(Bool.self, forKey: .isScreenshot)
+        isLivePhoto = try container.decode(Bool.self, forKey: .isLivePhoto)
+        if let value = try container.decodeIfPresent(AssetLocalAvailability.self, forKey: .localAvailability) {
+            localAvailability = value
+        } else {
+            let legacy = try container.decodeIfPresent(Bool.self, forKey: .locallyAvailable)
+            localAvailability = legacy == false ? .notDownloaded : .available
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(localIdentifier, forKey: .localIdentifier)
+        try container.encode(favorite, forKey: .favorite)
+        try container.encode(isEdited, forKey: .isEdited)
+        try container.encode(mediaType, forKey: .mediaType)
+        try container.encode(pixelWidth, forKey: .pixelWidth)
+        try container.encode(pixelHeight, forKey: .pixelHeight)
+        try container.encode(duration, forKey: .duration)
+        try container.encodeIfPresent(creationDate, forKey: .creationDate)
+        try container.encodeIfPresent(modificationDate, forKey: .modificationDate)
+        try container.encode(isScreenshot, forKey: .isScreenshot)
+        try container.encode(isLivePhoto, forKey: .isLivePhoto)
+        try container.encode(localAvailability, forKey: .localAvailability)
+        try container.encode(localAvailability.isAvailable, forKey: .locallyAvailable)
     }
 
     func matches(_ record: AssetRecord) -> Bool {
