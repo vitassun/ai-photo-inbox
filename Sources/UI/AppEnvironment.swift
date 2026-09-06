@@ -118,7 +118,7 @@ final class AppEnvironment: ObservableObject, PhotoLibraryChangeObserving {
             newAssetCount: database.countAssets(createdAtOrAfter: dayStart, before: dayEnd),
             // 待确认数只来自当前有效建议集合。恢复尚未完成时显示 0，
             // 页面同时由扫描状态提示“恢复中”，不再拿旧裁决数量冒充当前结果。
-            pendingDeletionCount: engine.state == .done
+            pendingDeletionCount: engine.state == .done && !engine.isRestoringResults
                 ? engine.pendingDeletionIDs.count
                 : 0,
             actionCount: database.countActions(atOrAfter: dayStart, before: dayEnd)

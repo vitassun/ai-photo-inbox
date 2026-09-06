@@ -47,7 +47,8 @@ struct DailyInboxView: View {
 
                 // 扫描完成
                 if (authStatus == .authorized || authStatus == .limited),
-                   environment.engine.state == .done {
+                   environment.engine.state == .done,
+                   !environment.engine.isRestoringResults {
                     completedSection
                 }
             }
@@ -202,6 +203,13 @@ struct DailyInboxView: View {
                 .accessibilityHint("扫描会在当前资产或阶段边界暂停")
             }
 
+            if environment.engine.isRestoringResults {
+                Label("正在恢复上次扫描结果…", systemImage: "arrow.clockwise")
+                    .font(.footnote)
+                    .foregroundStyle(Theme.subtitleText)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
             // 扫描状态
             if let scanStatusText {
                 scanStatusView
@@ -246,7 +254,7 @@ struct DailyInboxView: View {
             )
         }
         .buttonStyle(.plain)
-        .disabled(isScanning)
+        .disabled(isScanning || environment.engine.isRestoringResults)
     }
 
     private var isScanPaused: Bool {
@@ -443,7 +451,7 @@ struct DailyInboxView: View {
         authStatus = environment.photoLibraryService.authorizationStatus
         environment.startChangeMonitoringIfAuthorized()
         summary = environment.todaySummary()
-        isScanning = environment.engine.state.isActive
+        isScanning = environment.engine.state.isActive || environment.engine.isRestoringResults
         if authStatus == .notDetermined && !accessPromptShown {
             accessPromptShown = true
             promptAccess()
@@ -457,7 +465,7 @@ struct DailyInboxView: View {
     }
 
     private func startScan() {
-        guard !isScanning else { return }
+        guard !isScanning, !environment.engine.isRestoringResults else { return }
         guard authStatus == .authorized || authStatus == .limited else {
             scanStatusText = "请先开启相册权限，再开始扫描。"
             if authStatus == .notDetermined { promptAccess() }

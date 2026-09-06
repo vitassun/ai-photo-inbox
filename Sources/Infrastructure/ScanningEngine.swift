@@ -169,6 +169,9 @@ final class ScanningEngine: ScanningEngineProtocol {
     private var keepDecisionIDsForRun: Set<String>?
     private var safetyErrorSnapshot: String?
     private var persistenceErrorSnapshot: String?
+    /// 完成快照在启动后异步恢复期间为 true。UI 不能把尚未装载的空镜像
+    /// 当成“没有待处理项”，也不能在恢复尚未结束时启动新一轮扫描。
+    private var restoringResultsSnapshot = false
 
     /// 仅在 workQueue 上读写。
     private var isDriving = false
@@ -209,6 +212,9 @@ final class ScanningEngine: ScanningEngineProtocol {
         // 完成结果保存在 scan_state 中，避免重启后状态显示 done 但三个
         // 清理入口为空。恢复在工作队列异步执行，不能阻塞 App 启动主线程。
         if machine.phase == .done {
+            snapshotLock.lock()
+            restoringResultsSnapshot = true
+            snapshotLock.unlock()
             workQueue.async { [weak self] in
                 self?.hydrateCompletedSnapshotOnQueue()
             }
@@ -241,6 +247,12 @@ final class ScanningEngine: ScanningEngineProtocol {
         snapshotLock.lock()
         defer { snapshotLock.unlock() }
         return persistenceErrorSnapshot
+    }
+
+    var isRestoringResults: Bool {
+        snapshotLock.lock()
+        defer { snapshotLock.unlock() }
+        return restoringResultsSnapshot
     }
 
     /// 删除完成后刷新内存视图（T10）：从候选组与评分视图里移除已删 id，
@@ -600,6 +612,12 @@ final class ScanningEngine: ScanningEngineProtocol {
     /// 一旦发现收藏/编辑/尺寸/时间等字段改变，整轮结果作废并回到 idle。
     private func hydrateCompletedSnapshotOnQueue() {
         guard machine.phase == .done else { return }
+        defer {
+            snapshotLock.lock()
+            restoringResultsSnapshot = false
+            snapshotLock.unlock()
+            notifyResultsChanged()
+        }
         guard let version = store.string(forKey: SnapshotKeys.version),
               Int(version) == ScanStateMachine.featureVersion,
               store.string(forKey: SnapshotKeys.schema)
