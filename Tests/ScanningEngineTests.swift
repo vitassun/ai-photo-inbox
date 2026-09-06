@@ -261,6 +261,14 @@ final class ScanningEngineTests: XCTestCase {
 
         // 新进程：loader 永远返回 nil（模拟图像不可得），只能靠复用已存哈希成组。
         let fakeService = FakePhotoLibraryService(records: makeRecords(4))
+        // fetching 完成时引擎会保存全量 AssetRecord；有这份基准才能证明
+        // 已持久化哈希仍对应当前相册，并安全地在 hashing 断点复用它们。
+        let encoder = JSONEncoder()
+        store.setString(String(ScanStateMachine.featureVersion), forKey: "scan.resultsVersion")
+        store.setString(
+            String(data: try encoder.encode(fakeService.records), encoding: .utf8),
+            forKey: "scan.resultAssets"
+        )
         let engine = ScanningEngine(
             photoLibrary: fakeService,
             database: database,
