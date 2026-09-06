@@ -20,4 +20,9 @@ final class GRDBKeyValueStore: KeyValueStore {
     func setString(_ value: String?, forKey key: String) {
         database.setKeyValue(value, forKey: key)
     }
+
+    @discardableResult
+    func setStringsAtomically(_ values: [String: String?]) -> Bool {
+        database.setKeyValuesAtomically(values)
+    }
 }

@@ -69,6 +69,7 @@ struct PHAssetSnapshot {
             pixelHeight: max(0, pixelHeight),
             duration: safeDuration,
             creationDate: creationDate ?? modificationDate,
+            modificationDate: modificationDate,
             isScreenshot: isScreenshot,
             isLivePhoto: isLivePhoto,
             latitude: safeLatitude,

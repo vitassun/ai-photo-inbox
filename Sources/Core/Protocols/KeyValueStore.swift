@@ -10,6 +10,18 @@ import Foundation
 protocol KeyValueStore {
     func string(forKey key: String) -> String?
     func setString(_ value: String?, forKey key: String)
+    /// 批量提交结果快照；生产实现必须在一个数据库事务中完成。
+    /// 返回 false 表示整批没有落盘，调用方不得把结果标记为已完成。
+    @discardableResult
+    func setStringsAtomically(_ values: [String: String?]) -> Bool
+}
+
+extension KeyValueStore {
+    @discardableResult
+    func setStringsAtomically(_ values: [String: String?]) -> Bool {
+        values.forEach { setString($0.value, forKey: $0.key) }
+        return true
+    }
 }
 
 /// 内存字典实现。线程不安全，仅供单元测试与 SwiftUI Preview 注入，
@@ -29,5 +41,11 @@ final class InMemoryKeyValueStore: KeyValueStore {
 
     func setString(_ value: String?, forKey key: String) {
         storage[key] = value
+    }
+
+    @discardableResult
+    func setStringsAtomically(_ values: [String: String?]) -> Bool {
+        values.forEach { storage[$0.key] = $0.value }
+        return true
     }
 }

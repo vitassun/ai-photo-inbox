@@ -22,6 +22,12 @@ struct DailyInboxView: View {
                 if let warning = environment.persistenceWarning {
                     persistenceWarningBanner(warning)
                 }
+                if let warning = environment.engine.persistenceError {
+                    persistenceWarningBanner(warning)
+                }
+                if let warning = environment.engine.safetyError {
+                    persistenceWarningBanner(warning)
+                }
                 if authStatus == .limited {
                     limitedBanner
                 }

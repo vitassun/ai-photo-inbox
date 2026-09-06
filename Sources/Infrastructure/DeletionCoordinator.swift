@@ -42,8 +42,19 @@ final class DeletionCoordinator {
             photoLibrary.fetchAssets(matching: requestedIDs).map { ($0.localIdentifier, $0) },
             uniquingKeysWith: { first, _ in first }
         )
-        let hashes = database.allFeatureprintHashes(featureVersion: ScanStateMachine.featureVersion)
-        let embeddings = database.allFeatureprintEmbeddings(featureVersion: ScanStateMachine.featureVersion)
+        let validAssetVersions = Dictionary(
+            uniqueKeysWithValues: latestRecords.map {
+                ($0.key, $0.value.modificationDate)
+            }
+        )
+        let hashes = database.allFeatureprintHashes(
+            featureVersion: ScanStateMachine.featureVersion,
+            validAssetVersions: validAssetVersions
+        )
+        let embeddings = database.allFeatureprintEmbeddings(
+            featureVersion: ScanStateMachine.featureVersion,
+            validAssetVersions: validAssetVersions
+        )
         let selectedIDs = Set(requestedIDs)
 
         var groupByID: [String: [ScoredMember]] = [:]

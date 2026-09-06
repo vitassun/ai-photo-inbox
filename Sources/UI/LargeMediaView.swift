@@ -276,8 +276,9 @@ struct LargeMediaView: View {
         }
         deletionCoordinator.execute(selections: selections, groups: []) { preflight, result in
             let approved = Set(result?.approvedIDs ?? [])
+            var auditSaved = true
             if !approved.isEmpty {
-                environment.database.markDeleted(assetIds: Array(approved))
+                auditSaved = environment.database.markDeleted(assetIds: Array(approved))
                 selectedIDs.subtract(approved)
                 approved.forEach { selectionSources[$0] = nil }
                 environment.engine.purgeDeletedFromViews(assetIds: Array(approved)) {
@@ -288,7 +289,9 @@ struct LargeMediaView: View {
                 }
             }
             isDeleting = false
-            if !preflight.safetyDataAvailable {
+            if !auditSaved {
+                statusText = "系统已批准删除，但本地记录保存失败；请检查存储空间后重试。"
+            } else if !preflight.safetyDataAvailable {
                 statusText = "无法读取保留记录，未提交任何删除。"
             } else if let result, result.cancelled {
                 statusText = "已记录此前批准的项目；系统确认被取消，后续批次未执行。"

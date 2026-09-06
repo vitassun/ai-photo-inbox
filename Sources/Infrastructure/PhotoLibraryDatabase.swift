@@ -124,6 +124,15 @@ final class PhotoLibraryDatabase {
             "CREATE INDEX IF NOT EXISTS idx_decisions_verdict_deleted ON decisions(verdict, deleted_at)",
             "CREATE INDEX IF NOT EXISTS idx_action_events_happened ON action_events(happened_at)",
         ]),
+        // v5：把 PhotoKit 修改版本与特征算法/请求版本一起绑定。
+        // 旧行的 asset_version 保持 NULL，读取端在生产扫描中视为不可复用；
+        // 这样迁移不会把无法证明新鲜度的历史特征重新放进建议链路。
+        (name: "v5.featureFreshness", statements: [
+            "ALTER TABLE assets ADD COLUMN modification_date REAL",
+            "ALTER TABLE featureprints ADD COLUMN asset_version REAL",
+            "ALTER TABLE featureprints ADD COLUMN vision_request_version INTEGER NOT NULL DEFAULT 1",
+            "CREATE INDEX IF NOT EXISTS idx_featureprints_freshness ON featureprints(feature_version, vision_request_version, asset_version)",
+        ]),
     ]
 
     static func makeMigrator(steps: [(name: String, statements: [String])] = migrationSteps) -> DatabaseMigrator {
@@ -187,81 +196,129 @@ final class PhotoLibraryDatabase {
         }
     }
 
+    /// 结果快照的单事务提交入口。任何一个键写失败都会回滚整批，
+    /// 让恢复逻辑只能看到完整旧快照或完整新快照。
+    @discardableResult
+    func setKeyValuesAtomically(_ values: [String: String?]) -> Bool {
+        do {
+            try writer.write { db in
+                for (key, value) in values {
+                    guard !key.isEmpty else { continue }
+                    if let value {
+                        try db.execute(
+                            sql: """
+                            INSERT INTO scan_state (key, value) VALUES (?, ?)
+                            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                            """,
+                            arguments: [key, value]
+                        )
+                    } else {
+                        try db.execute(
+                            sql: "DELETE FROM scan_state WHERE key = ?",
+                            arguments: [key]
+                        )
+                    }
+                }
+            }
+            return true
+        } catch {
+            return false
+        }
+    }
+
     // MARK: assets 表
 
     /// upsert by local_identifier。estimated_bytes 由引擎在 fetching 阶段经
     /// MediaSizeEstimator 填充（T17）；burst_id 属后续域保持默认 NULL；
     /// locally_available 如实落表（iCloud 未下载=0，大媒体页折叠分组依据）。
+    @discardableResult
     func upsert(
         asset record: AssetRecord,
         fetchedAt: Date,
         locallyAvailable: Bool? = nil,
         estimatedBytes: Int64? = nil
-    ) {
-        guard !record.localIdentifier.isEmpty else { return }
+    ) -> Bool {
+        guard !record.localIdentifier.isEmpty else { return false }
         let availability = locallyAvailable ?? record.locallyAvailable
-        try? writer.write { db in
-            try Self.writeAsset(
-                db: db,
-                record: record,
-                fetchedAt: fetchedAt,
-                locallyAvailable: availability,
-                estimatedBytes: estimatedBytes
-            )
+        do {
+            try writer.write { db in
+                try Self.writeAsset(
+                    db: db,
+                    record: record,
+                    fetchedAt: fetchedAt,
+                    locallyAvailable: availability,
+                    estimatedBytes: estimatedBytes
+                )
+            }
+            return true
+        } catch {
+            return false
         }
     }
 
     /// 批量写入资产快照；整个 fetching 轮次共用一个事务，避免 5 万张相册产生
     /// 5 万次独立提交。单资产 upsert 仍保留给 PhotoKit 增量事件和测试调用。
-    func upsert(assets records: [AssetRecord], fetchedAt: Date) {
+    @discardableResult
+    func upsert(assets records: [AssetRecord], fetchedAt: Date) -> Bool {
         let inputs = records.compactMap { record -> (AssetRecord, Bool, Int64?)? in
             guard !record.localIdentifier.isEmpty else { return nil }
             return (record, record.locallyAvailable, MediaSizeEstimator.estimatedBytes(for: record))
         }
-        guard !inputs.isEmpty else { return }
-        try? writer.write { db in
-            for (record, locallyAvailable, estimatedBytes) in inputs {
-                try Self.writeAsset(
-                    db: db,
-                    record: record,
-                    fetchedAt: fetchedAt,
-                    locallyAvailable: locallyAvailable,
-                    estimatedBytes: estimatedBytes
-                )
+        guard !inputs.isEmpty else { return true }
+        do {
+            try writer.write { db in
+                for (record, locallyAvailable, estimatedBytes) in inputs {
+                    try Self.writeAsset(
+                        db: db,
+                        record: record,
+                        fetchedAt: fetchedAt,
+                        locallyAvailable: locallyAvailable,
+                        estimatedBytes: estimatedBytes
+                    )
+                }
             }
+            return true
+        } catch {
+            return false
         }
     }
 
     /// 用一次完整的 PhotoKit 快照校准本地索引：写入当前资产并移除相册中
     /// 已不存在的旧行。整个替换在同一事务内完成，进程中断时不会留下半套快照。
     /// 增量变更不能调用此方法（应使用 upsert + removeAssetsFromLibrary）。
-    func replaceAssetSnapshot(_ records: [AssetRecord], fetchedAt: Date) {
+    @discardableResult
+    func replaceAssetSnapshot(_ records: [AssetRecord], fetchedAt: Date) -> Bool {
         let inputs = records.compactMap { record -> (AssetRecord, Bool, Int64?)? in
             guard !record.localIdentifier.isEmpty else { return nil }
             return (record, record.locallyAvailable, MediaSizeEstimator.estimatedBytes(for: record))
         }
         let incomingIDs = Set(inputs.map { $0.0.localIdentifier })
-        try? writer.write { db in
-            for (record, locallyAvailable, estimatedBytes) in inputs {
-                try Self.writeAsset(
-                    db: db,
-                    record: record,
-                    fetchedAt: fetchedAt,
-                    locallyAvailable: locallyAvailable,
-                    estimatedBytes: estimatedBytes
-                )
-            }
+        do {
+            try writer.write { db in
+                for (record, locallyAvailable, estimatedBytes) in inputs {
+                    try Self.writeAsset(
+                        db: db,
+                        record: record,
+                        fetchedAt: fetchedAt,
+                        locallyAvailable: locallyAvailable,
+                        estimatedBytes: estimatedBytes
+                    )
+                }
 
-            // 不使用 IN (...)，避免 5 万张相册触碰 SQLite 默认绑定参数上限。
-            // 注意：空快照也必须继续执行删除循环；否则相册被清空后，
-            // 本地索引会永久残留旧资产。
-            let existingIDs = try String.fetchAll(db, sql: "SELECT local_identifier FROM assets")
-            for staleID in existingIDs where !incomingIDs.contains(staleID) {
-                try db.execute(
-                    sql: "DELETE FROM assets WHERE local_identifier = ?",
-                    arguments: [staleID]
-                )
+                // 不使用 IN (...)，避免 5 万张相册触碰 SQLite 默认绑定参数上限。
+                // 注意：空快照也必须继续执行删除循环；否则相册被清空后，
+                // 本地索引会永久残留旧资产。
+                let existingIDs = try String.fetchAll(db, sql: "SELECT local_identifier FROM assets")
+                for staleID in existingIDs where !incomingIDs.contains(staleID) {
+                    try db.execute(
+                        sql: "DELETE FROM assets WHERE local_identifier = ?",
+                        arguments: [staleID]
+                    )
+                }
             }
+            return true
+        } catch {
+            return false
         }
     }
 
@@ -326,21 +383,41 @@ final class PhotoLibraryDatabase {
 
     // MARK: featureprints 表
 
-    func upsertFeatureprint(assetId: String, data: Data, featureVersion: Int, computedAt: Date) {
-        guard !assetId.isEmpty, !data.isEmpty else { return }
+    @discardableResult
+    func upsertFeatureprint(
+        assetId: String,
+        data: Data,
+        featureVersion: Int,
+        computedAt: Date,
+        assetVersion: Date? = nil,
+        visionRequestVersion: Int = AppConfig.visionRequestVersion
+    ) -> Bool {
+        guard !assetId.isEmpty, !data.isEmpty else { return false }
         let kind = Self.featureKind(for: data)
-        try? writer.write { db in
-            try db.execute(
-                sql: """
-                INSERT INTO featureprints (asset_id, feature_kind, feature_version, data, computed_at)
-                VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(asset_id, feature_kind) DO UPDATE SET
-                  feature_version = excluded.feature_version,
-                  data = excluded.data,
-                  computed_at = excluded.computed_at
-                """,
-                arguments: [assetId, kind, featureVersion, data, computedAt.timeIntervalSince1970]
-            )
+        do {
+            try writer.write { db in
+                try db.execute(
+                    sql: """
+                    INSERT INTO featureprints (
+                      asset_id, feature_kind, feature_version, data, computed_at,
+                      asset_version, vision_request_version
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(asset_id, feature_kind) DO UPDATE SET
+                      feature_version = excluded.feature_version,
+                      data = excluded.data,
+                      computed_at = excluded.computed_at,
+                      asset_version = excluded.asset_version,
+                      vision_request_version = excluded.vision_request_version
+                    """,
+                    arguments: [
+                        assetId, kind, featureVersion, data, computedAt.timeIntervalSince1970,
+                        assetVersion?.timeIntervalSince1970, visionRequestVersion,
+                    ]
+                )
+            }
+            return true
+        } catch {
+            return false
         }
     }
 
@@ -363,16 +440,27 @@ final class PhotoLibraryDatabase {
 
     /// 读回指定版本的全部 pHash（hex 字符串）。供杀进程续扫时复用已算特征，
     /// 避免整段 hashing 阶段空转重算。
-    func allFeatureprintHashes(featureVersion: Int) -> [String: String] {
+    func allFeatureprintHashes(
+        featureVersion: Int,
+        validAssetVersions: [String: Date?]? = nil
+    ) -> [String: String] {
         var result: [String: String] = [:]
         try? writer.read { db in
             let rows = try Row.fetchAll(
                 db,
-                sql: "SELECT asset_id, data FROM featureprints WHERE feature_version = ? AND feature_kind = 'hash'",
+                sql: """
+                SELECT asset_id, data, asset_version, vision_request_version
+                FROM featureprints
+                WHERE feature_version = ? AND feature_kind = 'hash'
+                """,
                 arguments: [featureVersion]
             )
             for row in rows {
-                if let data = row["data"] as? Data,
+                guard Self.isFeatureFresh(
+                    row: row,
+                    validAssetVersions: validAssetVersions
+                ),
+                let data = row["data"] as? Data,
                    let text = FeaturePrintCodec.decodeHash(data) {
                     result[row["asset_id"] as String] = text
                 }
@@ -382,16 +470,27 @@ final class PhotoLibraryDatabase {
     }
 
     /// 读回指定版本的全部 embedding（已归一化向量）。供续扫与聚类阶段复用。
-    func allFeatureprintEmbeddings(featureVersion: Int) -> [String: [Double]] {
+    func allFeatureprintEmbeddings(
+        featureVersion: Int,
+        validAssetVersions: [String: Date?]? = nil
+    ) -> [String: [Double]] {
         var result: [String: [Double]] = [:]
         try? writer.read { db in
             let rows = try Row.fetchAll(
                 db,
-                sql: "SELECT asset_id, data FROM featureprints WHERE feature_version = ? AND feature_kind = 'embedding'",
+                sql: """
+                SELECT asset_id, data, asset_version, vision_request_version
+                FROM featureprints
+                WHERE feature_version = ? AND feature_kind = 'embedding'
+                """,
                 arguments: [featureVersion]
             )
             for row in rows {
-                if let data = row["data"] as? Data,
+                guard Self.isFeatureFresh(
+                    row: row,
+                    validAssetVersions: validAssetVersions
+                ),
+                let data = row["data"] as? Data,
                    let vector = FeaturePrintCodec.decodeEmbedding(data),
                    EmbeddingMath.isUsable(vector) {
                     result[row["asset_id"] as String] = EmbeddingMath.normalized(vector)
@@ -402,16 +501,27 @@ final class PhotoLibraryDatabase {
     }
 
     /// 读回指定版本的全部四维特征分数。供 scoring 阶段续扫复用。
-    func allFeatureprintScores(featureVersion: Int) -> [String: [Double]] {
+    func allFeatureprintScores(
+        featureVersion: Int,
+        validAssetVersions: [String: Date?]? = nil
+    ) -> [String: [Double]] {
         var result: [String: [Double]] = [:]
         try? writer.read { db in
             let rows = try Row.fetchAll(
                 db,
-                sql: "SELECT asset_id, data FROM featureprints WHERE feature_version = ? AND feature_kind = 'scores'",
+                sql: """
+                SELECT asset_id, data, asset_version, vision_request_version
+                FROM featureprints
+                WHERE feature_version = ? AND feature_kind = 'scores'
+                """,
                 arguments: [featureVersion]
             )
             for row in rows {
-                if let data = row["data"] as? Data,
+                guard Self.isFeatureFresh(
+                    row: row,
+                    validAssetVersions: validAssetVersions
+                ),
+                let data = row["data"] as? Data,
                    let scores = FeaturePrintCodec.decodeScores(data) {
                     result[row["asset_id"] as String] = scores
                 }
@@ -422,30 +532,36 @@ final class PhotoLibraryDatabase {
 
     /// 删除完成后批量落审计状态。deleted_at 使"待确认"和"已获系统批准"分开，
     /// 同时保留行供诊断；如果资产稍后从系统相册消失，外键级联仍可清理它。
-    func markDeleted(assetIds: [String], at date: Date = Date()) {
-        guard !assetIds.isEmpty else { return }
-        try? writer.write { db in
-            for assetId in Set(assetIds) {
-                // PhotoKit 可能在确认框前已把某个 id 从库中移除；跳过不存在的
-                // 父行，避免一个过期 id 让整个批次因外键约束回滚。
-                guard (try Int.fetchOne(
-                    db,
-                    sql: "SELECT EXISTS(SELECT 1 FROM assets WHERE local_identifier = ?)",
-                    arguments: [assetId]
-                ) ?? 0) == 1 else { continue }
-                try db.execute(
-                    sql: """
-                    INSERT INTO decisions (asset_id, verdict, reason, decided_at, deleted_at)
-                    VALUES (?, 'delete', 'user_approved_system_confirm', ?, ?)
-                    ON CONFLICT(asset_id) DO UPDATE SET
-                      verdict = excluded.verdict,
-                      reason = excluded.reason,
-                      decided_at = excluded.decided_at,
-                      deleted_at = excluded.deleted_at
-                    """,
-                    arguments: [assetId, date.timeIntervalSince1970, date.timeIntervalSince1970]
-                )
+    @discardableResult
+    func markDeleted(assetIds: [String], at date: Date = Date()) -> Bool {
+        guard !assetIds.isEmpty else { return true }
+        do {
+            try writer.write { db in
+                for assetId in Set(assetIds) {
+                    // PhotoKit 可能在确认框前已把某个 id 从库中移除；跳过不存在的
+                    // 父行，避免一个过期 id 让整个批次因外键约束回滚。
+                    guard (try Int.fetchOne(
+                        db,
+                        sql: "SELECT EXISTS(SELECT 1 FROM assets WHERE local_identifier = ?)",
+                        arguments: [assetId]
+                    ) ?? 0) == 1 else { continue }
+                    try db.execute(
+                        sql: """
+                        INSERT INTO decisions (asset_id, verdict, reason, decided_at, deleted_at)
+                        VALUES (?, 'delete', 'user_approved_system_confirm', ?, ?)
+                        ON CONFLICT(asset_id) DO UPDATE SET
+                          verdict = excluded.verdict,
+                          reason = excluded.reason,
+                          decided_at = excluded.decided_at,
+                          deleted_at = excluded.deleted_at
+                        """,
+                        arguments: [assetId, date.timeIntervalSince1970, date.timeIntervalSince1970]
+                    )
+                }
             }
+            return true
+        } catch {
+            return false
         }
     }
 
@@ -585,21 +701,27 @@ final class PhotoLibraryDatabase {
 
     // MARK: decisions 表
 
-    func setDecision(assetId: String, verdict: Verdict, reason: String, decidedAt: Date) {
-        guard !assetId.isEmpty else { return }
-        try? writer.write { db in
-            try db.execute(
-                sql: """
-                INSERT INTO decisions (asset_id, verdict, reason, decided_at)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT(asset_id) DO UPDATE SET
-                  verdict = excluded.verdict,
-                  reason = excluded.reason,
-                  decided_at = excluded.decided_at,
-                  deleted_at = NULL
-                """,
-                arguments: [assetId, verdict.rawValue, reason, decidedAt.timeIntervalSince1970]
-            )
+    @discardableResult
+    func setDecision(assetId: String, verdict: Verdict, reason: String, decidedAt: Date) -> Bool {
+        guard !assetId.isEmpty else { return false }
+        do {
+            try writer.write { db in
+                try db.execute(
+                    sql: """
+                    INSERT INTO decisions (asset_id, verdict, reason, decided_at)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(asset_id) DO UPDATE SET
+                      verdict = excluded.verdict,
+                      reason = excluded.reason,
+                      decided_at = excluded.decided_at,
+                      deleted_at = NULL
+                    """,
+                    arguments: [assetId, verdict.rawValue, reason, decidedAt.timeIntervalSince1970]
+                )
+            }
+            return true
+        } catch {
+            return false
         }
     }
 
@@ -648,8 +770,9 @@ final class PhotoLibraryDatabase {
             INSERT INTO assets (
               local_identifier, favorite, is_edited, media_type,
               pixel_width, pixel_height, duration_seconds, creation_date,
-              is_screenshot, burst_id, estimated_bytes, locally_available, fetched_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              modification_date, is_screenshot, burst_id, estimated_bytes,
+              locally_available, fetched_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(local_identifier) DO UPDATE SET
               favorite = excluded.favorite,
               is_edited = excluded.is_edited,
@@ -658,6 +781,7 @@ final class PhotoLibraryDatabase {
               pixel_height = excluded.pixel_height,
               duration_seconds = excluded.duration_seconds,
               creation_date = excluded.creation_date,
+              modification_date = excluded.modification_date,
               is_screenshot = excluded.is_screenshot,
               estimated_bytes = excluded.estimated_bytes,
               locally_available = excluded.locally_available,
@@ -672,6 +796,7 @@ final class PhotoLibraryDatabase {
                 height,
                 duration,
                 safeCreationTimestamp,
+                record.modificationDate?.timeIntervalSince1970,
                 record.isScreenshot,
                 nil as String?,
                 safeEstimatedBytes,
@@ -716,5 +841,24 @@ final class PhotoLibraryDatabase {
         case 3: return "scores"
         default: return "legacy"
         }
+    }
+
+    /// 读取特征时同时校验请求版本与当前资产修改版本。
+    /// `validAssetVersions == nil` 保留旧测试/诊断 API 的读取语义；生产扫描
+    /// 总是传入完整映射，未知或 nil 版本一律视为不可复用。
+    private static func isFeatureFresh(
+        row: Row,
+        validAssetVersions: [String: Date?]?
+    ) -> Bool {
+        guard (row["vision_request_version"] as Int? ?? 0)
+                == AppConfig.visionRequestVersion else { return false }
+        guard let validAssetVersions else { return true }
+        let assetID = row["asset_id"] as String
+        guard let expectedOptional = validAssetVersions[assetID],
+              let expected = expectedOptional,
+              let stored = row["asset_version"] as Double? else {
+            return false
+        }
+        return abs(stored - expected.timeIntervalSince1970) < 0.000_001
     }
 }

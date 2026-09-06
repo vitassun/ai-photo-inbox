@@ -116,10 +116,11 @@ final class AppEnvironment: ObservableObject, PhotoLibraryChangeObserving {
         return DailyInboxSummary(
             dayStart: dayStart,
             newAssetCount: database.countAssets(createdAtOrAfter: dayStart, before: dayEnd),
-            // 结果镜像在启动时异步恢复；恢复完成前用数据库中的有效自动
-            // 裁决兜底，避免摘要短暂显示为 0。扫描完成后以内存建议为准。
-            pendingDeletionCount: max(engine.pendingDeletionIDs.count,
-                                      database.countDeleteVerdicts()),
+            // 待确认数只来自当前有效建议集合。恢复尚未完成时显示 0，
+            // 页面同时由扫描状态提示“恢复中”，不再拿旧裁决数量冒充当前结果。
+            pendingDeletionCount: engine.state == .done
+                ? engine.pendingDeletionIDs.count
+                : 0,
             actionCount: database.countActions(atOrAfter: dayStart, before: dayEnd)
         )
     }
@@ -138,7 +139,9 @@ final class AppEnvironment: ObservableObject, PhotoLibraryChangeObserving {
         let changedRecords = changedIDs.isEmpty
             ? []
             : photoLibraryService.fetchAssets(matching: changedIDs)
-        database.upsert(assets: changedRecords, fetchedAt: fetchedAt)
+        if !database.upsert(assets: changedRecords, fetchedAt: fetchedAt) {
+            persistenceWarning = "相册变更未能保存到本地数据库；请检查存储空间后重试。"
+        }
         engine.refreshAfterLibraryChange(
             records: changedRecords,
             removedIDs: event.removedIdentifiers

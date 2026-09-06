@@ -22,6 +22,7 @@ final class PhotoLibraryDatabaseTests: XCTestCase {
         height: Int = 1080,
         duration: Double = 0,
         creationDate: Date? = Date(timeIntervalSince1970: 1_700_000_000),
+        modificationDate: Date? = nil,
         isScreenshot: Bool = false,
         isLivePhoto: Bool = false,
         locallyAvailable: Bool = true
@@ -35,6 +36,7 @@ final class PhotoLibraryDatabaseTests: XCTestCase {
             pixelHeight: height,
             duration: duration,
             creationDate: creationDate,
+            modificationDate: modificationDate,
             isScreenshot: isScreenshot,
             isLivePhoto: isLivePhoto,
             latitude: nil,
@@ -67,6 +69,7 @@ final class PhotoLibraryDatabaseTests: XCTestCase {
         XCTAssertEqual(row["pixel_height"], 2160)
         XCTAssertEqual(row["duration_seconds"] as Double?, 12.5)
         XCTAssertEqual(row["creation_date"] as Double?, creation.timeIntervalSince1970)
+        XCTAssertNil(row["modification_date"] as Double?)
         XCTAssertEqual(row["is_screenshot"], false)
         XCTAssertEqual(row["locally_available"], false)   // iCloud 未下载
         XCTAssertNil(row["burst_id"])                     // T07 域，本卡 NULL
@@ -191,6 +194,44 @@ final class PhotoLibraryDatabaseTests: XCTestCase {
 
         database.markDeleted(assetIds: ["A"], at: Date(timeIntervalSince1970: 20))
         XCTAssertEqual(database.countDeleteVerdicts(), 0)
+    }
+
+    func testFeatureCacheRequiresMatchingAssetModificationVersion() throws {
+        let database = try makeDatabase()
+        let firstVersion = Date(timeIntervalSince1970: 1_700_000_100)
+        let secondVersion = Date(timeIntervalSince1970: 1_700_000_200)
+        database.upsert(
+            asset: makeAsset(id: "versioned", modificationDate: firstVersion),
+            fetchedAt: Date()
+        )
+        let hash = String(repeating: "a", count: 16)
+        XCTAssertTrue(database.upsertFeatureprint(
+            assetId: "versioned",
+            data: FeaturePrintCodec.encodeHash(hash),
+            featureVersion: ScanStateMachine.featureVersion,
+            computedAt: Date(),
+            assetVersion: firstVersion
+        ))
+        XCTAssertEqual(
+            database.allFeatureprintHashes(
+                featureVersion: ScanStateMachine.featureVersion,
+                validAssetVersions: ["versioned": firstVersion]
+            )["versioned"],
+            hash
+        )
+
+        database.upsert(
+            asset: makeAsset(id: "versioned", modificationDate: secondVersion),
+            fetchedAt: Date()
+        )
+        XCTAssertTrue(database.allFeatureprintHashes(
+            featureVersion: ScanStateMachine.featureVersion,
+            validAssetVersions: ["versioned": secondVersion]
+        ).isEmpty, "照片被编辑后不得复用旧特征")
+        XCTAssertTrue(database.allFeatureprintHashes(
+            featureVersion: ScanStateMachine.featureVersion,
+            validAssetVersions: ["versioned": nil]
+        ).isEmpty, "无法确认版本时不得复用特征")
     }
 
     func testPurgeFeatureprintsKeepsCurrentVersion() throws {

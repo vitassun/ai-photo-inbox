@@ -61,6 +61,7 @@ final class PhotoLibraryServiceTests: XCTestCase {
 
     func testAssetRecordMappingFillsAllFields() {
         let creation = Date(timeIntervalSince1970: 1_700_000_000)
+        let modification = Date(timeIntervalSince1970: 1_700_000_100)
         // 三个布尔的取值刻意错开（favorite≠isEdited、isEdited≠isScreenshot），
         // 若 makeAssetRecord 里实参标签互换，此用例必红。
         let record = makeSnapshot(
@@ -70,6 +71,7 @@ final class PhotoLibraryServiceTests: XCTestCase {
             pixelWidth: 1920,
             pixelHeight: 1080,
             creationDate: creation,
+            modificationDate: modification,
             isScreenshot: true
         ).makeAssetRecord()
 
@@ -81,6 +83,7 @@ final class PhotoLibraryServiceTests: XCTestCase {
         XCTAssertEqual(record?.pixelCount, 1920 * 1080)
         XCTAssertEqual(record?.duration, 0)          // 照片时长恒 0
         XCTAssertEqual(record?.creationDate, creation)
+        XCTAssertEqual(record?.modificationDate, modification)
         XCTAssertEqual(record?.isScreenshot, true)
 
         // 反向组合补齐 favorite↔isScreenshot 的区分度（上组两者同真）。

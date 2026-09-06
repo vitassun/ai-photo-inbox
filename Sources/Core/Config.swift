@@ -6,6 +6,13 @@
 import Foundation
 
 enum AppConfig {
+    /// 扫描循环的可让出批次，避免大相册长期占满工作队列。
+    static let scanBatchSize = 100
+
+    /// Vision 请求/特征提取实现版本。请求参数或模型语义改变时递增，
+    /// 即使扫描算法版本不变也必须让旧缓存失效。
+    static let visionRequestVersion = 1
+
     /// 时间分桶间隔（秒）：间隔 ≤ 此值视作同场景连拍窗口。
     /// 来源：tech-spec §3 / TimeBucketizer 默认值冻结；调参入口：corpus 回归集。
     static let timeGapThreshold: TimeInterval = 1800
