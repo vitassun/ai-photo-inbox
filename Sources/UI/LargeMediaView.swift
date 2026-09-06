@@ -82,11 +82,10 @@ struct LargeMediaView: View {
                 let record = recordForViewer(id: context.id)
                 SinglePhotoViewer(
                     localIdentifier: context.id,
+                    onDismiss: { viewerAssetID = nil },
                     mediaType: record?.mediaType ?? .image,
                     isLivePhoto: record?.isLivePhoto ?? false
-                ) {
-                    viewerAssetID = nil
-                }
+                )
             }
     }
 
