@@ -237,6 +237,7 @@ struct DeletionReviewView: View {
                 }
                 .buttonStyle(.borderless)
                 .padding(4)
+                .frame(width: 44, height: 44)
                 .accessibilityLabel(selected ? "取消选择照片" : "选择照片")
                 .accessibilityValue(selected ? "已选中" : "未选中")
             }

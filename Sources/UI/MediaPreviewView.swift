@@ -29,10 +29,7 @@ struct MediaPreviewView: View {
                     .onAppear { player.play() }
                     .onDisappear { player.pause() }
             } else if let image {
-                Image(uiImage: image)
-                    .resizable()
-                    .scaledToFit()
-                    .padding()
+                ZoomablePhoto(image: image)
             } else if failed {
                 VStack(spacing: 12) {
                     Image(systemName: "photo.badge.exclamationmark")
@@ -115,6 +112,46 @@ struct MediaPreviewView: View {
                 }
             }
         }
+    }
+}
+
+/// 大图预览支持双指缩放和双击放大；缩放状态只存在于当前查看器，
+/// 不会把临时图片数据或用户相册内容写入本地存储。
+private struct ZoomablePhoto: View {
+    let image: UIImage
+
+    @State private var scale: CGFloat = 1
+    @GestureState private var pinchScale: CGFloat = 1
+
+    private var effectiveScale: CGFloat {
+        min(max(scale * pinchScale, 1), 4)
+    }
+
+    var body: some View {
+        ScrollView([.horizontal, .vertical], showsIndicators: false) {
+            Image(uiImage: image)
+                .resizable()
+                .scaledToFit()
+                .scaleEffect(effectiveScale)
+                .frame(minWidth: 1, minHeight: 1)
+                .padding()
+                .contentShape(Rectangle())
+                .gesture(
+                    MagnificationGesture()
+                        .updating($pinchScale) { value, state, _ in
+                            state = value
+                        }
+                        .onEnded { value in
+                            scale = min(max(scale * value, 1), 4)
+                        }
+                )
+                .onTapGesture(count: 2) {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        scale = scale > 1 ? 1 : 2
+                    }
+                }
+        }
+        .accessibilityLabel("照片预览，可双指缩放")
     }
 }
 

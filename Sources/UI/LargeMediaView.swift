@@ -244,6 +244,7 @@ struct LargeMediaView: View {
                         .foregroundStyle(selected ? .red : .gray)
                 }
                 .buttonStyle(.plain)
+                .frame(width: 44, height: 44)
                 .accessibilityLabel(selected ? "取消选择大媒体" : "选择大媒体")
                 .accessibilityValue(selected ? "已选中" : "未选中")
             }

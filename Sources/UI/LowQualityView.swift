@@ -215,6 +215,7 @@ struct LowQualityView: View {
                     }
                     .buttonStyle(.borderless)  // 独立触控目标，确保不被上层 onTapGesture 拦截
                     .padding(4)
+                    .frame(width: 44, height: 44)
                     .accessibilityLabel(selected ? "取消选择低质量照片" : "选择低质量照片")
                     .accessibilityValue(selected ? "已选中" : "未选中")
                 } else {
