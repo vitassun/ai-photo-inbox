@@ -71,6 +71,7 @@ jobs:
 
       - name: Run unit tests (iPhone 17 simulator)
         run: |
+          mkdir -p build
           rm -rf build/AIPhotoInbox-tests.xcresult
           if xcodebuild test \
             -project AIPhotoInbox.xcodeproj \
