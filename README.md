@@ -54,7 +54,8 @@ project.yml 里因此写的是 `5.0`，写 `5.9` 会直接构建失败。
 
 1. 本地改 Swift 文件（VS Code + Swift 插件获得语法高亮即可）；
 2. push 到 `main`（或开 PR）→ Actions 的 `ios-ci` 自动跑：
-   `checkout → brew install xcodegen → xcodegen generate → xcodebuild test`；
+   `checkout → brew install xcodegen → xcodegen generate → xcodebuild test`；测试结果包、完整
+   xcodebuild 日志和未签名设备构建日志都会作为工件保留 14 天；
 3. 红了就点进日志找第一个 error（后面的级联错误不用看），修完再 push。
 
 **首次 CI 大概率报小错——这是预期内的，按日志迭代就是任务卡 T01 的正常工作方式。**

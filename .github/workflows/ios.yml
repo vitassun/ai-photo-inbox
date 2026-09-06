@@ -71,10 +71,12 @@ jobs:
 
       - name: Run unit tests (iPhone 17 simulator)
         run: |
+          rm -rf build/AIPhotoInbox-tests.xcresult
           if xcodebuild test \
             -project AIPhotoInbox.xcodeproj \
             -scheme AIPhotoInbox \
             -destination 'platform=iOS Simulator,name=iPhone 17,OS=latest' \
+            -resultBundlePath build/AIPhotoInbox-tests.xcresult \
             > /tmp/xcodebuild.log 2>&1; then
             echo "ALL TESTS PASSED"
             # 每个测试套件汇总成一条 ::notice:: 注解（匿名可读核实用例数；
@@ -140,6 +142,17 @@ jobs:
             exit 1
           fi
 
+      - name: Upload test result bundle and complete log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: AIPhotoInbox-test-results
+          path: |
+            /tmp/xcodebuild.log
+            build/AIPhotoInbox-tests.xcresult
+          if-no-files-found: warn
+          retention-days: 14
+
       - name: Verify compiled app icon metadata
         run: |
           APP="build/Build/Products/Release-iphoneos/AIPhotoInbox.app"
@@ -161,6 +174,15 @@ jobs:
             exit 1
           fi
           echo "AppIcon compiled: Assets.car present, CFBundleIconName=$ICON_NAME"
+
+      - name: Upload device build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: AIPhotoInbox-device-build-log
+          path: /tmp/xcodebuild-device.log
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Package Payload zip
         run: |

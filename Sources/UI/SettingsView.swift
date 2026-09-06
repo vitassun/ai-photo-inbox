@@ -1,7 +1,7 @@
 // MARK: - SettingsView
-// 职责：设置页（P12）——深色主题适配。权限状态面板、云端分析开关（默认关 + 首次
-//       显式同意才可开启）、订阅管理占位、关于。红线 4：未同意前零出网。
-// 任务卡：T18。
+// 职责：设置页——深色主题适配。权限状态面板、订阅管理占位、关于。
+// 云端 LLM 仍保留为受同意门闩保护的基础设施，但当前没有可用的产品入口，
+// 因此不在设置页展示一个不会产生实际结果的开关。
 
 import SwiftUI
 
@@ -10,14 +10,11 @@ struct SettingsView: View {
     @Environment(\.scenePhase) private var scenePhase
     @EnvironmentObject private var tabBarState: RootTabBarState
 
-    @State private var cloudOn = false
-    @State private var showConsentSheet = false
     @State private var authStatus: PhotoAuthorizationStatus = .notDetermined
 
     var body: some View {
         Form {
             permissionSection
-            cloudSection
             subscriptionSection
             aboutSection
         }
@@ -34,15 +31,9 @@ struct SettingsView: View {
         .onChange(of: scenePhase) { phase in
             if phase == .active { refreshStatus() }
         }
-        .sheet(isPresented: $showConsentSheet) {
-            ConsentSheet { granted in
-                cloudOn = CloudConsent.setEnabled(granted, store: environment.store)
-            }
-        }
     }
 
     private func refreshStatus() {
-        cloudOn = CloudConsent.isEnabled(store: environment.store)
         authStatus = environment.photoLibraryService.authorizationStatus
         environment.startChangeMonitoringIfAuthorized()
     }
@@ -63,29 +54,6 @@ struct SettingsView: View {
                     environment.photoLibraryService.openSystemSettings()
                 }
             }
-        }
-        .listRowBackground(Theme.sectionBackground)
-    }
-
-    // MARK: 云端分析（默认关）
-
-    private var cloudSection: some View {
-        Section {
-            Toggle("允许云端 AI 兜底", isOn: Binding(
-                get: { cloudOn },
-                set: { newValue in
-                    if newValue {
-                        cloudOn = false
-                        showConsentSheet = true
-                    } else {
-                        cloudOn = CloudConsent.setEnabled(false, store: environment.store)
-                    }
-                }
-            ))
-        } header: {
-            Text("云端分析")
-        } footer: {
-            Text("默认关闭。关闭时全部识别在本机完成，零出网请求。")
         }
         .listRowBackground(Theme.sectionBackground)
     }
@@ -121,47 +89,6 @@ struct SettingsView: View {
         case let (short?, nil): return short
         case let (nil, build?): return build
         default: return "未知"
-        }
-    }
-}
-
-/// 同意确认 sheet：深色主题适配。
-private struct ConsentSheet: View {
-    let onDecision: (Bool) -> Void
-    @Environment(\.dismiss) private var dismiss
-
-    var body: some View {
-        NavigationStack {
-            VStack(alignment: .leading, spacing: 16) {
-                Text("开启云端分析前，请确认")
-                    .font(.headline)
-                Text(CloudConsent.consentNotice)
-                    .font(.subheadline)
-                Text(CloudConsent.destinationNotice)
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                Spacer()
-            }
-            .padding()
-            .background(Theme.backgroundGradient.ignoresSafeArea())
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button("取消") {
-                        onDecision(false)
-                        dismiss()
-                    }
-                }
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("同意并开启") {
-                        onDecision(true)
-                        dismiss()
-                    }
-                    .bold()
-                }
-            }
-            .navigationTitle("云端分析")
-            .navigationBarTitleDisplayMode(.inline)
-            .preferredColorScheme(.dark)
         }
     }
 }
