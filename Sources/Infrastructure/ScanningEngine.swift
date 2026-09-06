@@ -1320,6 +1320,13 @@ final class ScanningEngine: ScanningEngineProtocol {
         }
 
         machine.advance()
+        // Mark the already-written result set complete only after the state
+        // machine reaches done. This keeps restart recovery from accepting a
+        // snapshot captured just before the final phase transition.
+        guard persistSnapshotsOnQueue() else {
+            pauseForPersistenceFailureOnQueue()
+            return false
+        }
         publishSnapshot()
         reportProgress()
         return true

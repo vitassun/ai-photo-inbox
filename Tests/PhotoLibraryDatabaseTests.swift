@@ -72,6 +72,7 @@ final class PhotoLibraryDatabaseTests: XCTestCase {
         XCTAssertNil(row["modification_date"] as Double?)
         XCTAssertEqual(row["is_screenshot"], false)
         XCTAssertEqual(row["locally_available"], false)   // iCloud 未下载
+        XCTAssertEqual(row["availability_state"], "notDownloaded")
         XCTAssertNil(row["burst_id"])                     // T07 域，本卡 NULL
         XCTAssertNil(row["estimated_bytes"])              // T07 域，本卡 NULL
         XCTAssertEqual(row["fetched_at"] as Double?, 1_800_000_000)

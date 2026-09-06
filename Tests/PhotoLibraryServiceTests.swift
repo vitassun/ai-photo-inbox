@@ -38,6 +38,7 @@ final class PhotoLibraryServiceTests: XCTestCase {
         isScreenshot: Bool = false,
         isLivePhoto: Bool = false,
         locallyAvailable: Bool = true,
+        localAvailability: AssetLocalAvailability? = nil,
         latitude: Double? = nil,
         longitude: Double? = nil
     ) -> PHAssetSnapshot {
@@ -55,7 +56,8 @@ final class PhotoLibraryServiceTests: XCTestCase {
             isLivePhoto: isLivePhoto,
             locallyAvailable: locallyAvailable,
             latitude: latitude,
-            longitude: longitude
+            longitude: longitude,
+            localAvailability: localAvailability
         )
     }
 
@@ -123,6 +125,15 @@ final class PhotoLibraryServiceTests: XCTestCase {
         let record = makeSnapshot(creationDate: nil, modificationDate: nil).makeAssetRecord()
         XCTAssertNotNil(record)
         XCTAssertNil(record?.creationDate)
+    }
+
+    func testUnknownLocalAvailabilityIsNotTreatedAsReleasable() {
+        let record = makeSnapshot(
+            locallyAvailable: false,
+            localAvailability: .unknown
+        ).makeAssetRecord()
+        XCTAssertEqual(record?.localAvailability, .unknown)
+        XCTAssertFalse(record?.locallyAvailable ?? true)
     }
 
     // MARK: 全量映射

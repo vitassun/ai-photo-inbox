@@ -49,6 +49,7 @@ final class ScanningEngineTests: XCTestCase {
         favorite: Bool = false,
         isEdited: Bool = false
     ) -> AssetRecord {
+        let effectiveDate = creationDate ?? Date(timeIntervalSince1970: 1_700_000_000)
         AssetRecord(
             localIdentifier: id,
             favorite: favorite,
@@ -57,7 +58,8 @@ final class ScanningEngineTests: XCTestCase {
             pixelWidth: 100,
             pixelHeight: 100,
             duration: 0,
-            creationDate: creationDate ?? Date(timeIntervalSince1970: 1_700_000_000),
+            creationDate: effectiveDate,
+            modificationDate: effectiveDate,
             isScreenshot: false,
             isLivePhoto: false,
             latitude: latitude,

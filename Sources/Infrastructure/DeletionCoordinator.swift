@@ -38,8 +38,14 @@ final class DeletionCoordinator {
         }
 
         let requestedIDs = normalized.map(\.assetID)
+        // Suggestions must be checked against their current replacement assets
+        // as well as the selected ids; refreshing only the selected rows would
+        // make every persisted group look like it had lost its Best Shot.
+        let idsToRefresh = Set(
+            requestedIDs + groups.flatMap { $0.members.map { $0.record.localIdentifier } }
+        )
         let latestRecords = Dictionary(
-            photoLibrary.fetchAssets(matching: requestedIDs).map { ($0.localIdentifier, $0) },
+            photoLibrary.fetchAssets(matching: Array(idsToRefresh)).map { ($0.localIdentifier, $0) },
             uniquingKeysWith: { first, _ in first }
         )
         let validAssetVersions = Dictionary(
