@@ -9,6 +9,31 @@
 import Foundation
 import GRDB
 
+struct FeatureprintWrite {
+    let assetId: String
+    let data: Data
+    let featureVersion: Int
+    let computedAt: Date
+    let assetVersion: Date?
+    let visionRequestVersion: Int
+
+    init(
+        assetId: String,
+        data: Data,
+        featureVersion: Int,
+        computedAt: Date,
+        assetVersion: Date? = nil,
+        visionRequestVersion: Int = AppConfig.visionRequestVersion
+    ) {
+        self.assetId = assetId
+        self.data = data
+        self.featureVersion = featureVersion
+        self.computedAt = computedAt
+        self.assetVersion = assetVersion
+        self.visionRequestVersion = visionRequestVersion
+    }
+}
+
 final class PhotoLibraryDatabase {
 
     /// 迁移步骤（有序）。拆成"建表/建索引"两步既贴合 DDL，
@@ -393,27 +418,48 @@ final class PhotoLibraryDatabase {
         visionRequestVersion: Int = AppConfig.visionRequestVersion
     ) -> Bool {
         guard !assetId.isEmpty, !data.isEmpty else { return false }
-        let kind = Self.featureKind(for: data)
+        return upsertFeatureprints([
+            FeatureprintWrite(
+                assetId: assetId,
+                data: data,
+                featureVersion: featureVersion,
+                computedAt: computedAt,
+                assetVersion: assetVersion,
+                visionRequestVersion: visionRequestVersion
+            )
+        ])
+    }
+
+    /// 特征按批次在同一事务写入，避免五万张相册产生五万次提交。
+    @discardableResult
+    func upsertFeatureprints(_ writes: [FeatureprintWrite]) -> Bool {
+        let validWrites = writes.filter { !$0.assetId.isEmpty && !$0.data.isEmpty }
+        guard !validWrites.isEmpty else { return true }
         do {
             try writer.write { db in
-                try db.execute(
-                    sql: """
-                    INSERT INTO featureprints (
-                      asset_id, feature_kind, feature_version, data, computed_at,
-                      asset_version, vision_request_version
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(asset_id, feature_kind) DO UPDATE SET
-                      feature_version = excluded.feature_version,
-                      data = excluded.data,
-                      computed_at = excluded.computed_at,
-                      asset_version = excluded.asset_version,
-                      vision_request_version = excluded.vision_request_version
-                    """,
-                    arguments: [
-                        assetId, kind, featureVersion, data, computedAt.timeIntervalSince1970,
-                        assetVersion?.timeIntervalSince1970, visionRequestVersion,
-                    ]
-                )
+                for write in validWrites {
+                    let kind = Self.featureKind(for: write.data)
+                    try db.execute(
+                        sql: """
+                        INSERT INTO featureprints (
+                          asset_id, feature_kind, feature_version, data, computed_at,
+                          asset_version, vision_request_version
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(asset_id, feature_kind) DO UPDATE SET
+                          feature_version = excluded.feature_version,
+                          data = excluded.data,
+                          computed_at = excluded.computed_at,
+                          asset_version = excluded.asset_version,
+                          vision_request_version = excluded.vision_request_version
+                        """,
+                        arguments: [
+                            write.assetId, kind, write.featureVersion, write.data,
+                            write.computedAt.timeIntervalSince1970,
+                            write.assetVersion?.timeIntervalSince1970,
+                            write.visionRequestVersion,
+                        ]
+                    )
+                }
             }
             return true
         } catch {
@@ -456,7 +502,7 @@ final class PhotoLibraryDatabase {
                 arguments: [featureVersion]
             )
             for row in rows {
-                guard Self.isFeatureFresh(
+                if Self.isFeatureFresh(
                     row: row,
                     validAssetVersions: validAssetVersions
                 ),
@@ -486,7 +532,7 @@ final class PhotoLibraryDatabase {
                 arguments: [featureVersion]
             )
             for row in rows {
-                guard Self.isFeatureFresh(
+                if Self.isFeatureFresh(
                     row: row,
                     validAssetVersions: validAssetVersions
                 ),
@@ -517,7 +563,7 @@ final class PhotoLibraryDatabase {
                 arguments: [featureVersion]
             )
             for row in rows {
-                guard Self.isFeatureFresh(
+                if Self.isFeatureFresh(
                     row: row,
                     validAssetVersions: validAssetVersions
                 ),
