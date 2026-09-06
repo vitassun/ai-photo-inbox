@@ -145,6 +145,38 @@ final class ScanningEngineTests: XCTestCase {
         XCTAssertEqual(database.assetCount(), 3, "幂等 upsert 不产生重复资产行")
     }
 
+    func testKeepingScoredCandidateUpdatesAllResultSnapshots() throws {
+        let database = try PhotoLibraryDatabase.inMemory()
+        let store = GRDBKeyValueStore(database: database)
+        let queue = DispatchQueue(label: "test.engine.keep-sync")
+        let engine = ScanningEngine(
+            photoLibrary: FakePhotoLibraryService(records: makeRecords(2)),
+            database: database,
+            store: store,
+            imageDataLoader: { _ in Data([0x01]) },
+            hashComputer: { _ in String(repeating: "a", count: 16) },
+            workQueue: queue
+        )
+
+        runAndWait(engine, workQueue: queue, progressLog: ProgressLog())
+        let candidate = try XCTUnwrap(engine.scoredGroups.first?.preselectableIDs.first)
+        XCTAssertTrue(database.setDecision(
+            assetId: candidate,
+            verdict: .keep,
+            reason: "user_override",
+            decidedAt: Date()
+        ))
+
+        engine.removeScoredCandidates(assetIds: [candidate])
+        queue.sync { }
+
+        XCTAssertFalse(engine.scoredGroups.flatMap(\.members)
+            .map { $0.record.localIdentifier }.contains(candidate))
+        XCTAssertFalse(engine.candidateGroups.flatMap(\.memberIDs).contains(candidate))
+        XCTAssertFalse(engine.lowQualityCandidates.map(\.record.localIdentifier).contains(candidate))
+        XCTAssertFalse(engine.largeMediaCandidates.map(\.record.localIdentifier).contains(candidate))
+    }
+
     // MARK: 杀进程模拟：写入 hashing/0.4 → 重建实例 → 恢复一致
 
     func testKillProcessSimulationRestoresPhaseAndProgressFromGRDB() throws {

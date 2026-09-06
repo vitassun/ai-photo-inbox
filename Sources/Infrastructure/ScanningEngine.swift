@@ -343,6 +343,80 @@ final class ScanningEngine: ScanningEngineProtocol {
         }
     }
 
+    /// 用户在相似组页明确保留后，从所有当前结果镜像中移除该资产。
+    /// 只收窄现有建议，不在没有完整特征的情况下凭空生成新建议；下一轮扫描
+    /// 会重新评估撤销保留的资产。
+    func removeScoredCandidates(assetIds: [String], completion: (() -> Void)? = nil) {
+        workQueue.async { [weak self] in
+            guard let self else { return }
+            let removed = Set(assetIds)
+            guard !removed.isEmpty else {
+                completion?()
+                return
+            }
+
+            let keepRead = self.database.assetIDsResult(withVerdict: .keep)
+            let protectedIDs: Set<String>?
+            if case .success(let ids) = keepRead {
+                protectedIDs = ids
+            } else {
+                protectedIDs = nil
+                self.setPersistenceErrorOnQueue("无法读取保留记录，剩余建议已暂停自动选择")
+            }
+
+            self.snapshotLock.lock()
+            self.candidateGroupsSnapshot = self.candidateGroupsSnapshot.compactMap { group in
+                let remaining = group.members.filter {
+                    !removed.contains($0.localIdentifier)
+                }
+                guard remaining.count >= 2 else { return nil }
+                return CandidateGroup(
+                    id: group.id,
+                    members: remaining,
+                    reason: group.reason
+                )
+            }
+            self.scoredGroupsSnapshot = self.scoredGroupsSnapshot.compactMap { group in
+                let remaining = group.members.filter {
+                    !removed.contains($0.record.localIdentifier)
+                }
+                guard remaining.count >= 2 else { return nil }
+                let rebuiltMembers = remaining.enumerated().map { index, member in
+                    ScoredMember(
+                        record: member.record,
+                        score: member.score,
+                        isBestShot: index == 0
+                    )
+                }
+                let newBestID = rebuiltMembers.first?.record.localIdentifier
+                let remainingIDs = Set(remaining.map { $0.record.localIdentifier })
+                let safePreselectable = protectedIDs.map { ids in
+                    group.preselectableIDs.filter {
+                        remainingIDs.contains($0)
+                            && $0 != newBestID
+                            && !ids.contains($0)
+                    }
+                } ?? []
+                return ScoredGroup(
+                    groupID: group.groupID,
+                    reason: group.reason,
+                    members: rebuiltMembers,
+                    preselectableIDs: safePreselectable
+                )
+            }
+            self.lowQualitySnapshot.removeAll {
+                removed.contains($0.record.localIdentifier)
+            }
+            self.largeMediaSnapshot.removeAll {
+                removed.contains($0.record.localIdentifier)
+            }
+            self.snapshotLock.unlock()
+            _ = self.persistSnapshotsOnQueue()
+            self.notifyResultsChanged()
+            completion?()
+        }
+    }
+
     /// 用户在大媒体页明确保留后，立即从当前镜像移出；撤销入口只撤销
     /// keep 记录，下一轮扫描再重新评估，避免在本轮把结果偷偷加回来。
     func removeLargeMediaCandidates(assetIds: [String], completion: (() -> Void)? = nil) {

@@ -290,6 +290,9 @@ struct DeletionReviewView: View {
             )
         }
         statusText = "已保留这张照片，之后不会自动建议删除。"
+        environment.engine.removeScoredCandidates(assetIds: [id]) {
+            DispatchQueue.main.async { reloadFromEnvironment() }
+        }
     }
 
     private func undoKeep() {
