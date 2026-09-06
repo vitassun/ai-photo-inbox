@@ -103,9 +103,7 @@ struct LargeMediaView: View {
             get: { viewerAssetID.map { SingleAssetViewerContext(id: $0) } },
             set: { viewerAssetID = $0?.id }
         )) { context in
-            let record = candidates.first {
-                $0.record.localIdentifier == context.id
-            }?.record
+            let record = recordForViewer(id: context.id)
             SinglePhotoViewer(
                 localIdentifier: context.id,
                 mediaType: record?.mediaType ?? .image,
@@ -114,6 +112,12 @@ struct LargeMediaView: View {
                 viewerAssetID = nil
             }
         }
+    }
+
+    private func recordForViewer(id: String) -> AssetRecord? {
+        candidates.first { candidate in
+            candidate.record.localIdentifier == id
+        }?.record
     }
 
     private var listSpacer: some View { Spacer(minLength: 0) }
