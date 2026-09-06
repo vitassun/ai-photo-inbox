@@ -25,6 +25,20 @@ struct LowQualityCandidate: Codable, Equatable {
     /// 默认值保留旧的纯逻辑构造调用；真实扫描时由引擎显式置为 true。
     let isOnlyInGroup: Bool = false
 
+    init(
+        record: AssetRecord,
+        kind: LowQualityKind,
+        clarity: Double,
+        isNightExempt: Bool,
+        isOnlyInGroup: Bool = false
+    ) {
+        self.record = record
+        self.kind = kind
+        self.clarity = clarity
+        self.isNightExempt = isNightExempt
+        self.isOnlyInGroup = isOnlyInGroup
+    }
+
     var canPreselect: Bool {
         LowQualityDetector.preselectable(self)
     }

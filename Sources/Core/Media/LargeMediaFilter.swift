@@ -14,6 +14,12 @@ struct LargeMediaCandidate: Codable, Equatable {
     /// 默认值保持旧的纯逻辑构造调用兼容；真实扫描时由引擎显式置位。
     let isOnlyInGroup: Bool = false
 
+    init(record: AssetRecord, estimatedBytes: Int64, isOnlyInGroup: Bool = false) {
+        self.record = record
+        self.estimatedBytes = estimatedBytes
+        self.isOnlyInGroup = isOnlyInGroup
+    }
+
     var canPreselect: Bool {
         !isOnlyInGroup && !record.favorite && !record.isEdited && record.locallyAvailable
     }
