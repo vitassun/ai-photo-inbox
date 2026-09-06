@@ -23,7 +23,7 @@ struct LowQualityCandidate: Codable, Equatable {
     /// 低质量 pass 只处理未被相似组认领的资产。此类资产没有已知替代品，
     /// 因而可以展示给用户，但永远不能被“全选建议”自动预选。
     /// 默认值保留旧的纯逻辑构造调用；真实扫描时由引擎显式置为 true。
-    let isOnlyInGroup: Bool = false
+    let isOnlyInGroup: Bool
 
     init(
         record: AssetRecord,
@@ -37,6 +37,28 @@ struct LowQualityCandidate: Codable, Equatable {
         self.clarity = clarity
         self.isNightExempt = isNightExempt
         self.isOnlyInGroup = isOnlyInGroup
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case record, kind, clarity, isNightExempt, isOnlyInGroup
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        record = try container.decode(AssetRecord.self, forKey: .record)
+        kind = try container.decode(LowQualityKind.self, forKey: .kind)
+        clarity = try container.decode(Double.self, forKey: .clarity)
+        isNightExempt = try container.decode(Bool.self, forKey: .isNightExempt)
+        isOnlyInGroup = try container.decodeIfPresent(Bool.self, forKey: .isOnlyInGroup) ?? false
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(record, forKey: .record)
+        try container.encode(kind, forKey: .kind)
+        try container.encode(clarity, forKey: .clarity)
+        try container.encode(isNightExempt, forKey: .isNightExempt)
+        try container.encode(isOnlyInGroup, forKey: .isOnlyInGroup)
     }
 
     var canPreselect: Bool {

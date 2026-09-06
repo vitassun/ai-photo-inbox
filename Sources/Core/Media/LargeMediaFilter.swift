@@ -12,12 +12,30 @@ struct LargeMediaCandidate: Codable, Equatable {
     let estimatedBytes: Int64
     /// 未被相似组认领的大媒体没有已知替代品，只能展示，不能被全选建议预选。
     /// 默认值保持旧的纯逻辑构造调用兼容；真实扫描时由引擎显式置位。
-    let isOnlyInGroup: Bool = false
+    let isOnlyInGroup: Bool
 
     init(record: AssetRecord, estimatedBytes: Int64, isOnlyInGroup: Bool = false) {
         self.record = record
         self.estimatedBytes = estimatedBytes
         self.isOnlyInGroup = isOnlyInGroup
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case record, estimatedBytes, isOnlyInGroup
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        record = try container.decode(AssetRecord.self, forKey: .record)
+        estimatedBytes = try container.decode(Int64.self, forKey: .estimatedBytes)
+        isOnlyInGroup = try container.decodeIfPresent(Bool.self, forKey: .isOnlyInGroup) ?? false
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(record, forKey: .record)
+        try container.encode(estimatedBytes, forKey: .estimatedBytes)
+        try container.encode(isOnlyInGroup, forKey: .isOnlyInGroup)
     }
 
     var canPreselect: Bool {
