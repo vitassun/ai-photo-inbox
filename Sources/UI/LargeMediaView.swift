@@ -72,12 +72,8 @@ struct LargeMediaView: View {
                 reload()
             }
             .onDisappear { tabBarState.isHidden = false }
-            .onChange(of: scenePhase) { phase in
-                if phase == .active { reload() }
-            }
-            .onChange(of: environment.libraryRevision) { _ in
-                reload()
-            }
+            .onChange(of: scenePhase, perform: handleScenePhaseChange)
+            .onChange(of: environment.libraryRevision) { _ in handleLibraryRevisionChange() }
             .fullScreenCover(item: Binding(
                 get: { viewerAssetID.map { SingleAssetViewerContext(id: $0) } },
                 set: { viewerAssetID = $0?.id }
@@ -127,6 +123,15 @@ struct LargeMediaView: View {
         candidates.first { candidate in
             candidate.record.localIdentifier == id
         }?.record
+    }
+
+    private func handleScenePhaseChange(_ phase: ScenePhase) {
+        guard phase == .active else { return }
+        reload()
+    }
+
+    private func handleLibraryRevisionChange() {
+        reload()
     }
 
     private var listSpacer: some View { Spacer(minLength: 0) }
