@@ -50,7 +50,7 @@ final class ScanningEngineTests: XCTestCase {
         isEdited: Bool = false
     ) -> AssetRecord {
         let effectiveDate = creationDate ?? Date(timeIntervalSince1970: 1_700_000_000)
-        AssetRecord(
+        return AssetRecord(
             localIdentifier: id,
             favorite: favorite,
             isEdited: isEdited,
