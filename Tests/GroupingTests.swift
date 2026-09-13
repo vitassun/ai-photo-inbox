@@ -245,6 +245,99 @@ final class GroupingTests: XCTestCase {
         XCTAssertTrue(groups.isEmpty, "照片与视频封面不能仅凭相似哈希互相替代")
     }
 
+    // MARK: 重叠窗口去重与确定性（T04 补充验收）
+
+    /// 251 张同一时刻、同一哈希、同一坐标的照片会触发分桶的容量上限，
+    /// 被切成多个重叠窗口。窗口重叠曾导致同一资产出现在多个候选组里。
+    /// 现在要求：一个资产只属于一个最终组。
+    func testCandidateGrouperDeduplicatesOverlappingWindowMembers() {
+        let count = 251
+        var records: [AssetRecord] = []
+        var hashes: [String: String] = [:]
+        // seconds 恒为 0 → 全部同一时刻，必然触发窗口切分。
+        for index in 0..<count {
+            let id = String(format: "dup-%03d", index)
+            records.append(makeGroupingRecord(
+                id: id, seconds: 0, latitude: 31.0, longitude: 121.0
+            ))
+            hashes[id] = String(repeating: "f", count: 16)
+        }
+
+        let groups = CandidateGrouper.groups(from: records, hashByID: hashes)
+
+        // 跨窗口收集关系后统一组装：全部 251 张应落在同一个连通分量里。
+        XCTAssertEqual(groups.count, 1, "重叠窗口不应把同一批照片拆成多组")
+        let allIDs = Set(records.map(\.localIdentifier))
+        XCTAssertEqual(Set(groups[0].memberIDs), allIDs)
+        XCTAssertEqual(groups[0].memberIDs.count, count, "成员不能有重复")
+
+        // 每个资产只出现在一个组里。
+        var seen = Set<String>()
+        for group in groups {
+            for id in group.memberIDs {
+                XCTAssertTrue(seen.insert(id).inserted, "资产 \(id) 出现在多个候选组中")
+            }
+        }
+    }
+
+    /// 打乱输入顺序必须产出完全一致的结果（含组 id 与组内顺序）。
+    func testCandidateGrouperIsOrderIndependent() {
+        var records: [AssetRecord] = []
+        var hashes: [String: String] = [:]
+        // 三簇，各自同哈希；簇间时间/坐标都隔开，不会互相连通。
+        let clusterHashes = [
+            String(repeating: "1", count: 16),
+            String(repeating: "3", count: 16),
+            String(repeating: "7", count: 16),
+        ]
+        for (clusterIndex, prefix) in ["p", "q", "r"].enumerated() {
+            for index in 0..<4 {
+                let id = "\(prefix)\(index)"
+                records.append(makeGroupingRecord(
+                    id: id,
+                    seconds: Double(clusterIndex * 7_200 + index * 30),
+                    latitude: 20.0 + Double(clusterIndex), longitude: 110.0
+                ))
+                hashes[id] = clusterHashes[clusterIndex]
+            }
+        }
+
+        let forward = CandidateGrouper.groups(from: records, hashByID: hashes)
+        let reversed = CandidateGrouper.groups(from: records.reversed(), hashByID: hashes)
+
+        XCTAssertEqual(forward.count, 3)
+        XCTAssertEqual(
+            forward.map { ($0.id, $0.memberIDs) }.map { "\($0.0):\($0.1.joined(separator: ","))" },
+            reversed.map { ($0.id, $0.memberIDs) }.map { "\($0.0):\($0.1.joined(separator: ","))" },
+            "打乱输入顺序后组 id 与成员顺序都必须一致"
+        )
+    }
+
+    /// 链式相似（A~B~C）应同组，但**直接**相似关系只有 A-B 与 B-C，
+    /// A 与 C 不直接相似——删除建议必须依赖直接相似，不能靠连通性推断替代。
+    func testGroupingResultExposesDirectSimilarityEdgesNotJustConnectivity() {
+        var records: [AssetRecord] = []
+        for index in 0..<3 {
+            records.append(makeGroupingRecord(id: "chain-\(index)", seconds: Double(index * 10)))
+        }
+        // A 与 B 距离 4，B 与 C 距离 4，A 与 C 距离 8（都 ≤ 阈值 8，故仍连通）。
+        let hashes = [
+            "chain-0": "0000000000000000",
+            "chain-1": "000000000000000f",
+            "chain-2": "00000000000000ff",
+        ]
+
+        let result = CandidateGrouper.grouping(from: records, hashByID: hashes)
+
+        XCTAssertEqual(result.groups.count, 1)
+        XCTAssertEqual(result.groups[0].memberIDs.count, 3, "链式相似应连成一个组")
+        XCTAssertTrue(result.isDirectlySimilar("chain-0", "chain-1"))
+        XCTAssertTrue(result.isDirectlySimilar("chain-1", "chain-2"))
+        XCTAssertEqual(result.neighbors(of: "chain-1"), Set(["chain-0", "chain-2"]))
+        // 边表必须来自"实际比较是否命中"，而不是"同组即两两相似"。
+        XCTAssertEqual(result.edges.count, 3, "三条直接相似边都应被记录")
+    }
+
     // MARK: 引擎 hashing 阶段集成（假图像源 + 真 pHash）
 
     private func makeRecord(
