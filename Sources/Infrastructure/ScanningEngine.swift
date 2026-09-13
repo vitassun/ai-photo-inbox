@@ -2107,7 +2107,7 @@ final class ScanningEngine: ScanningEngineProtocol {
                 ) else {
                     setPersistenceErrorOnQueue("评分保存失败，请检查存储空间后重试")
                     pauseForPersistenceFailureOnQueue()
-                    return false
+                    return .interrupted
                 }
             }
             let clarity = scoresByID[assetId]?.clarity ?? 0.5
