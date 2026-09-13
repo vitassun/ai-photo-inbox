@@ -45,6 +45,11 @@ final class InMemoryKeyValueStore: KeyValueStore {
     /// 写入尝试次数（含失败），供测试断言"失败后没有重试写入基线"。
     private(set) var writeAttempts: [String] = []
 
+    /// 清空写入尝试记录（测试辅助；`writeAttempts` 本身只读）。
+    func resetWriteAttempts() {
+        writeAttempts.removeAll()
+    }
+
     init() {}
 
     init(prepopulated: [String: String]) {

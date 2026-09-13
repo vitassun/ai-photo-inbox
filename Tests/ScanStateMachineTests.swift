@@ -194,7 +194,7 @@ final class ScanStateMachineTests: XCTestCase {
 
         // 解除失败后同一进度必须再尝试写入并成功。
         store.failingKeys = []
-        store.writeAttempts.removeAll()
+        store.resetWriteAttempts()
         machine.setProgress(0)
         XCTAssertTrue(
             store.writeAttempts.contains("scan.progress"),
