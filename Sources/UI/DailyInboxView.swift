@@ -45,11 +45,16 @@ struct DailyInboxView: View {
                 // 处理入口
                 scanEntrySection
 
-                // 扫描完成
+                // 扫描完成：只有"扫到 done + 恢复完毕 + 没有待分析欠账"
+                // 才展示完整结果入口。存在欠账时改由 pendingSection 提示
+                // "结果待更新"，绝不提前声明全库已扫描。
                 if (authStatus == .authorized || authStatus == .limited),
-                   environment.engine.state == .done,
-                   !environment.engine.isRestoringResults {
+                   environment.engine.isResultSetComplete {
                     completedSection
+                } else if (authStatus == .authorized || authStatus == .limited),
+                          environment.engine.hasPendingAnalysis,
+                          !environment.engine.state.isActive {
+                    pendingSection
                 }
             }
             .padding(.horizontal, 16)
@@ -276,6 +281,56 @@ struct DailyInboxView: View {
                 .font(.footnote)
                 .foregroundStyle(Theme.subtitleText)
         }
+    }
+
+    // MARK: - 结果待更新入口
+
+    /// 相册有新增/修改/删除、但差分重扫尚未补齐时的过渡状态。
+    /// 明确告诉用户结果不是最新的，并提供"立即更新"入口去补齐欠账。
+    private var pendingSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("结果待更新")
+                    .font(.headline)
+                    .foregroundStyle(Theme.titleText)
+                Image(systemName: "clock.arrow.circlepath")
+                    .font(.caption.bold())
+                    .foregroundStyle(Theme.accentOrange)
+                Spacer()
+                Text("\(environment.engine.pendingAnalysisCount) 张")
+                    .font(.caption)
+                    .foregroundStyle(Theme.subtitleText)
+            }
+
+            Text("相册有变更，以下结果尚未重新分析。补齐后才会显示为最新结果。")
+                .font(.footnote)
+                .foregroundStyle(Theme.subtitleText)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            Button {
+                startScan()
+            } label: {
+                HStack {
+                    Image(systemName: "arrow.triangle.2.circlepath")
+                    Text("立即更新")
+                    Spacer()
+                }
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(Theme.accentBlue)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Theme.accentBlue.opacity(0.12), in: RoundedRectangle(cornerRadius: 12))
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Theme.cardBackground, in: RoundedRectangle(cornerRadius: 16))
+        .overlay(
+            RoundedRectangle(cornerRadius: 16)
+                .stroke(Theme.accentOrange.opacity(0.25), lineWidth: 0.5)
+        )
     }
 
     // MARK: - 扫描完成入口

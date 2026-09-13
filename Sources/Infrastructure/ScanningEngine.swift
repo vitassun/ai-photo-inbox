@@ -105,9 +105,13 @@ final class ScanningEngine: ScanningEngineProtocol {
         static let largeMedia = "scan.largeMediaCandidates"
         static let round = "scan.resultRound"
         static let complete = "scan.resultComplete"
+        /// 待分析资产集合（增量扫描语义）。保存被相册变更影响、尚未重新
+        /// 分析完成的资产 id 与其当前版本。恢复时按版本差量重算，而不是
+        /// 只要可见这套"待更新"状态就无法声明全库已扫描。
+        static let pending = "scan.pendingAnalysis"
     }
 
-    private static let snapshotSchemaVersion = 2
+    private static let snapshotSchemaVersion = 3
 
     private let machine: ScanStateMachine
     private let photoLibrary: PhotoLibraryServiceProtocol
@@ -204,6 +208,17 @@ final class ScanningEngine: ScanningEngineProtocol {
     /// 本批次不再继续处理它们，等下一轮 fetching 以新版本重算。
     private var expiredAssetIDs: Set<String> = []
 
+    /// 待分析资产集合（增量分析语义）：相册变更影响、但尚未重新分析完成的
+    /// 资产 id → 变更后应达到的版本（modificationDate）。
+    ///
+    /// 与 `pendingChangedIDs` 的区别：那一个只是"本次扫描进行中收到的变更"
+    /// 的临时缓冲，扫描一结束就消费掉；这一份是**持久化**的欠账，决定
+    /// UI 能否声明"全库已扫描"，也是重启后差量恢复的依据。
+    /// 所有读写都在 `workQueue` 上；UI 侧通过 `pendingAnalysisSnapshot` 只读镜像。
+    private var pendingAnalysis: [String: Date?] = [:]
+    /// `pendingAnalysis` 的线程安全只读镜像，供 UI 线程判断"结果待更新"。
+    private var pendingAnalysisSnapshot: [String: Date?] = [:]
+
     init(
         photoLibrary: PhotoLibraryServiceProtocol,
         database: PhotoLibraryDatabase,
@@ -277,6 +292,30 @@ final class ScanningEngine: ScanningEngineProtocol {
         snapshotLock.lock()
         defer { snapshotLock.unlock() }
         return restoringResultsSnapshot
+    }
+
+    /// 是否存在尚未分析完成、结果待更新的资产。
+    ///
+    /// 首页据此显示"结果待更新"，且**不得**声明全库已扫描——只要这份欠账
+    /// 不为空，候选组/低质量/大媒体三处结果就都还可能是旧的。
+    var hasPendingAnalysis: Bool {
+        snapshotLock.lock()
+        defer { snapshotLock.unlock() }
+        return !pendingAnalysisSnapshot.isEmpty
+    }
+
+    /// 待分析资产数量，用于首页展示具体欠了多少张。
+    var pendingAnalysisCount: Int {
+        snapshotLock.lock()
+        defer { snapshotLock.unlock() }
+        return pendingAnalysisSnapshot.count
+    }
+
+    /// 结果是否处于"完整可用"状态：扫描到 done、已完成快照恢复、
+    /// 且没有任何待分析欠账。三个条件缺一不可。
+    var isResultSetComplete: Bool {
+        guard state == .done, !isRestoringResults else { return false }
+        return !hasPendingAnalysis
     }
 
     /// 删除完成后刷新内存视图（T10）：从候选组与评分视图里移除已删 id，
@@ -475,10 +514,17 @@ final class ScanningEngine: ScanningEngineProtocol {
             guard let self else { return }
             let changed = Set(records.map(\.localIdentifier)).union(removedIDs)
 
+            // 先把欠账登记下来再清缓存：任何后续失败路径（清理失败、
+            // 保存失败）都不能让这批变更"悄悄消失"，否则 UI 会拿旧结果
+            // 声明全库已扫描。
+            self.markPendingAnalysisOnQueue(records: records, removedIDs: removedIDs)
+
             // 先失效缓存和自动裁决，再决定是否延后到本轮扫描结束处理；
             // 后续任何恢复路径都不能读到变更前的特征。
             guard self.database.removeFeatureprints(assetIds: Array(changed)),
                   self.database.clearAutomaticDeleteDecisions(assetIds: Array(changed)) else {
+                // 清理失败：欠账必须落盘，让下次启动的差量恢复接手。
+                _ = self.persistSnapshotsOnQueue()
                 self.setPersistenceErrorOnQueue("相册变更的旧分析结果清理失败，请检查存储空间后重试")
                 self.pauseForPersistenceFailureOnQueue()
                 return
@@ -487,6 +533,9 @@ final class ScanningEngine: ScanningEngineProtocol {
                 self.pendingLibraryChange = true
                 self.pendingChangedIDs.formUnion(changed)
                 self.pendingChangedRecords.append(contentsOf: records)
+                // 扫描进行中也要让 UI 看到"结果待更新"。
+                self.syncPendingAnalysisSnapshotOnQueue()
+                self.notifyResultsChanged()
                 return
             }
 
@@ -553,20 +602,54 @@ final class ScanningEngine: ScanningEngineProtocol {
             default:
                 break
             }
-            // idle（全新/复位后）清掉非当前版本与旧轮次的特征数据；
-            // 全量重扫仍清理旧缓存，避免一次完整重建把旧裁决带入新轮次。
+            // idle（全新/复位后）清掉非当前版本的特征数据。
+            // 全量扫描也**保留仍然匹配的特征**：只清除"内容版本对不上"或
+            // 已不在相册里的资产。这样一次完整重建不会把用户已算过的
+            // hash/embedding/score 全部丢进回收站，重扫成本可控。
             if self.machine.phase == .idle {
                 if self.store.string(forKey: SnapshotKeys.round) == nil {
                     self.beginNewSnapshotRoundOnQueue()
                 }
-                // 新一轮全量扫描没有可验证的资产内容版本；清掉旧特征，
-                // 以正确性优先，避免同一 id 的修改照片复用旧结果。
-                guard self.database.purgeFeatureprints(keepingFeatureVersion: ScanStateMachine.featureVersion),
-                      self.database.removeAllFeatureprints(),
-                      self.database.clearAutomaticDeleteDecisions() else {
+                guard self.database.purgeFeatureprints(keepingFeatureVersion: ScanStateMachine.featureVersion) else {
                     self.setPersistenceErrorOnQueue("旧分析结果清理失败，请检查存储空间后重试")
                     self.pauseForPersistenceFailureOnQueue()
                     return
+                }
+                // 版本对得上、但资产内容已经变了的特征不能复用。这里用
+                // 已落盘的资产快照做差量比对，只清这批过期特征；
+                // 没有可比较的快照时（旧版本升级 / 手工断点）无法证明
+                // 任何特征仍有效，安全回退到全清。
+                if let saved = self.storedAssetSnapshotOnQueue() {
+                    let currentRecords = self.uniqueRecords(
+                        self.photoLibrary.fetchAllAssets().filter { !$0.localIdentifier.isEmpty }
+                    )
+                    let currentByID = Dictionary(
+                        currentRecords.map { ($0.localIdentifier, $0) },
+                        uniquingKeysWith: { first, _ in first }
+                    )
+                    let staleIDs = saved.compactMap { record -> String? in
+                        guard let now = currentByID[record.localIdentifier] else {
+                            return record.localIdentifier
+                        }
+                        return record.matches(now) ? nil : record.localIdentifier
+                    }
+                    let purgedFeatures = staleIDs.isEmpty
+                        || self.database.removeFeatureprints(assetIds: staleIDs)
+                    // staleIDs 为空时不能把 nil 传下去——nil 语义是"全清"，
+                    // 会把用户已确认之外的全部建议抹掉。空数组才是 no-op。
+                    guard purgedFeatures,
+                          self.database.clearAutomaticDeleteDecisions(assetIds: staleIDs) else {
+                        self.setPersistenceErrorOnQueue("旧分析结果清理失败，请检查存储空间后重试")
+                        self.pauseForPersistenceFailureOnQueue()
+                        return
+                    }
+                } else {
+                    guard self.database.removeAllFeatureprints(),
+                          self.database.clearAutomaticDeleteDecisions() else {
+                        self.setPersistenceErrorOnQueue("旧分析结果清理失败，请检查存储空间后重试")
+                        self.pauseForPersistenceFailureOnQueue()
+                        return
+                    }
                 }
             }
             self.startDrivingOnQueue()
@@ -634,6 +717,12 @@ final class ScanningEngine: ScanningEngineProtocol {
 
     /// 从已完成扫描保存的值恢复候选镜像。资产元数据必须与保存时一致；
     /// 一旦发现收藏/编辑/尺寸/时间等字段改变，整轮结果作废并回到 idle。
+    ///
+    /// 恢复语义按"差量优先"设计：
+    /// 1. 快照格式/版本不兼容或损坏 → 全量重建（清特征、回 idle）；
+    /// 2. 相册与快照有差异 → 只让差异部分失效，其余结果保留，
+    ///    同时把差异登记为待分析欠账，由增量扫描补齐；
+    /// 3. 完全一致且欠账为空 → 直接可用，声明全库已扫描。
     private func hydrateCompletedSnapshotOnQueue() {
         guard machine.phase == .done else { return }
         defer {
@@ -642,6 +731,11 @@ final class ScanningEngine: ScanningEngineProtocol {
             snapshotLock.unlock()
             notifyResultsChanged()
         }
+        // 先把持久化的待分析欠账读回来：即使后续任何分支失败，
+        // UI 也不能在欠账存在时显示"已扫描完成"。
+        pendingAnalysis = decodePendingAnalysis(store.string(forKey: SnapshotKeys.pending))
+        syncPendingAnalysisSnapshotOnQueue()
+
         guard let version = store.string(forKey: SnapshotKeys.version),
               Int(version) == ScanStateMachine.featureVersion,
               store.string(forKey: SnapshotKeys.schema)
@@ -652,10 +746,8 @@ final class ScanningEngine: ScanningEngineProtocol {
               let savedAssets = try? JSONDecoder().decode([PersistedAssetRecord].self, from: assetsData),
               let scoredData = store.string(forKey: SnapshotKeys.scored)?.data(using: .utf8),
               let savedScored = try? JSONDecoder().decode([ScoredGroup].self, from: scoredData) else {
-            clearRunSnapshots()
-            _ = machine.reset()
-            publishSnapshot()
-            notifyResultsChanged()
+            // 快照格式不兼容或损坏：这是唯一需要全量重建的场景。
+            fullRebuildOnQueue()
             return
         }
 
@@ -668,13 +760,12 @@ final class ScanningEngine: ScanningEngineProtocol {
         guard let restoredCandidates = decode(SnapshotKeys.candidates, as: [CandidateGroup].self),
               let restoredLowQuality = decode(SnapshotKeys.lowQuality, as: [LowQualityCandidate].self),
               let restoredLargeMedia = decode(SnapshotKeys.largeMedia, as: [LargeMediaCandidate].self) else {
-            clearRunSnapshots()
-            _ = machine.reset()
-            publishSnapshot()
-            notifyResultsChanged()
+            // 结果体损坏、无法解析：快照本身不可信，走全量重建。
+            fullRebuildOnQueue()
             return
         }
         guard let protectedIDs = keepDecisionIDsOnQueue() else {
+            // 安全数据读不出来：不清结果（保留可见性），只暂停并报错。
             clearRunSnapshots(clearSafetyError: false)
             _ = machine.reset()
             publishSnapshot()
@@ -685,19 +776,49 @@ final class ScanningEngine: ScanningEngineProtocol {
         let current = uniqueRecords(
             photoLibrary.fetchAllAssets().filter { !$0.localIdentifier.isEmpty }
         )
-        let currentByID = Dictionary(current.map { ($0.localIdentifier, $0) },
-                                     uniquingKeysWith: { first, _ in first })
-        let changed = savedAssets.count != current.count
-            || savedAssets.contains { record in
-                guard let currentRecord = currentByID[record.localIdentifier] else { return true }
-                return !record.matches(currentRecord)
+        // 差量比对：找出相对快照"新增 / 修改 / 删除"的资产。
+        // 与旧实现的关键差别：不再因为存在任何差异就把整轮结果作废，
+        // 而是只让差异部分失效并登记欠账，无关组原样保留。
+        let savedByID = Dictionary(
+            savedAssets.map { ($0.localIdentifier, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        let currentByID = Dictionary(
+            current.map { ($0.localIdentifier, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        var changedIDs = Set<String>()
+        var removedIDs = Set<String>()
+        for record in savedAssets {
+            guard let currentRecord = currentByID[record.localIdentifier] else {
+                // 快照里有、相册里没有 → 删除。
+                removedIDs.insert(record.localIdentifier)
+                changedIDs.insert(record.localIdentifier)
+                continue
             }
-        if changed {
-            clearRunSnapshots()
-            _ = machine.reset()
-            publishSnapshot()
-            notifyResultsChanged()
-            return
+            if !record.matches(currentRecord) {
+                // 元数据变了（收藏/编辑/尺寸/时间/地理等）→ 修改。
+                changedIDs.insert(record.localIdentifier)
+            }
+        }
+        for record in current where savedByID[record.localIdentifier] == nil {
+            // 相册里有、快照里没有 → 新增。
+            changedIDs.insert(record.localIdentifier)
+        }
+
+        if !changedIDs.isEmpty {
+            // 只让受影响部分失效：登记欠账 + 清相关特征与裁决，
+            // 保留其余组与候选，避免用户每加一张照片就等整轮重扫。
+            markPendingAnalysisOnQueue(
+                records: current.filter { changedIDs.contains($0.localIdentifier) },
+                removedIDs: Array(removedIDs)
+            )
+            guard database.removeFeatureprints(assetIds: Array(changedIDs)),
+                  database.clearAutomaticDeleteDecisions(assetIds: Array(changedIDs)) else {
+                setPersistenceErrorOnQueue("增量恢复的旧分析结果清理失败，请检查存储空间后重试")
+                pauseForPersistenceFailureOnQueue()
+                return
+            }
         }
 
         fetchedRecords = current
@@ -727,6 +848,11 @@ final class ScanningEngine: ScanningEngineProtocol {
             guard group.members.allSatisfy({ currentIDs.contains($0.record.localIdentifier) }) else {
                 return nil
             }
+            // 只要组内有一个成员进了待分析欠账，这条组的相似/替代关系
+            // 就已经不可信（它可能正是被删掉的那张的替代品），整组退出结果。
+            guard !group.members.contains(where: {
+                changedIDs.contains($0.record.localIdentifier)
+            }) else { return nil }
             // scan_state 是可损坏/可被旧版本写入的外部状态；恢复时重新
             // 应用 SafetyRules 和直接相似阈值，不能盲信持久化的预选 id。
             let safeIDs = GroupScoring.preselectableIDs(
@@ -765,13 +891,42 @@ final class ScanningEngine: ScanningEngineProtocol {
             )
         }
         snapshotLock.lock()
-        candidateGroupsSnapshot = restoredCandidates.filter {
-            $0.members.allSatisfy { currentIDs.contains($0.localIdentifier) }
+        // 恢复时同时按两个条件过滤：资产仍在相册里，且**不在待分析欠账里**。
+        // 欠账资产的特征已被清掉，若保留它所在的组，用户会看到一套
+        // 基于旧特征的相似关系/替代关系，删除建议就失去了依据。
+        candidateGroupsSnapshot = restoredCandidates.filter { group in
+            group.members.allSatisfy {
+                currentIDs.contains($0.localIdentifier)
+                    && !changedIDs.contains($0.localIdentifier)
+            }
         }
         scoredGroupsSnapshot = filteredScored
-        lowQualitySnapshot = safeLowQuality
-        largeMediaSnapshot = safeLargeMedia
+        lowQualitySnapshot = safeLowQuality.filter {
+            !changedIDs.contains($0.record.localIdentifier)
+        }
+        largeMediaSnapshot = safeLargeMedia.filter {
+            !changedIDs.contains($0.record.localIdentifier)
+        }
         snapshotLock.unlock()
+        // 结果体与欠账一起落盘：这一步失败也不能让内存视图领先于持久化状态，
+        // 所以下面的失败分支会退回"待更新"而不是静默宣称完成。
+        if !persistSnapshotsOnQueue() {
+            // 保留已恢复的内存结果供浏览，但欠账已落盘（persistSnapshots
+            // 内部的 complete 判定会写 0），用户看到的是"结果待更新"。
+            notifyResultsChanged()
+            return
+        }
+        notifyResultsChanged()
+    }
+
+    /// 全量重建：快照格式不兼容、损坏，或安全数据不可信时的兜底路径。
+    /// 这是唯一会清空全部缓存结果的分支；差量场景不走这里。
+    private func fullRebuildOnQueue() {
+        clearRunSnapshots()
+        pendingAnalysis = [:]
+        syncPendingAnalysisSnapshotOnQueue()
+        _ = machine.reset()
+        publishSnapshot()
         notifyResultsChanged()
     }
 
@@ -785,7 +940,10 @@ final class ScanningEngine: ScanningEngineProtocol {
         let lowQuality = lowQualitySnapshot
         let largeMedia = largeMediaSnapshot
         let assets = fetchedRecords.map(PersistedAssetRecord.init)
-        let complete = machine.phase == .done ? "1" : "0"
+        // 只有在状态机到达 done **且**没有任何待分析欠账时才算完整结果。
+        // 只要还有新增/修改/删除未被重新分析，就必须写 0，
+        // 否则重启恢复会把一套已知不完整的结果当成全库已扫描。
+        let complete = (machine.phase == .done && pendingAnalysis.isEmpty) ? "1" : "0"
         snapshotLock.unlock()
 
         guard let assetsData = try? encoder.encode(assets),
@@ -812,12 +970,17 @@ final class ScanningEngine: ScanningEngineProtocol {
             SnapshotKeys.scored: scoredText,
             SnapshotKeys.lowQuality: lowQualityText,
             SnapshotKeys.largeMedia: largeMediaText,
+            SnapshotKeys.pending: encodePendingAnalysisOnQueue(),
         ]
         let saved = store.setStringsAtomically(snapshotValues)
         guard saved else {
             setPersistenceErrorOnQueue("扫描结果保存失败，请检查存储空间后重试")
             return false
         }
+        // 只有"待分析欠账为空 + 结果已完整保存"才提交完成标记。
+        // 顺序很关键：上面的原子写已经带上 complete 值，这里再同步镜像，
+        // 保证 UI 看到的 hasPendingAnalysis 与落盘内容一致。
+        syncPendingAnalysisSnapshotOnQueue()
         clearPersistenceErrorOnQueue()
         notifyResultsChanged()
         return true
@@ -880,12 +1043,99 @@ final class ScanningEngine: ScanningEngineProtocol {
             SnapshotKeys.scored: nil,
             SnapshotKeys.lowQuality: nil,
             SnapshotKeys.largeMedia: nil,
+            SnapshotKeys.pending: nil,
         ]
         guard store.setStringsAtomically(emptySnapshot) else {
             setPersistenceErrorOnQueue("旧扫描结果清理失败，请检查存储空间后重试")
             return
         }
+        pendingAnalysis = [:]
+        syncPendingAnalysisSnapshotOnQueue()
         clearPersistenceErrorOnQueue()
+    }
+
+    // MARK: 待分析欠账（增量分析语义）
+
+    /// 待分析集合落盘格式：`[{"id": "...", "version": <时间戳或 null>}]`。
+    /// 用数组而非字典，保证相同集合的序列化字节稳定（便于比较与调试）。
+    private struct PendingAnalysisEntry: Codable, Equatable {
+        let id: String
+        let version: Date?
+    }
+
+    private func encodePendingAnalysisOnQueue() -> String? {
+        let entries = pendingAnalysis
+            .map { PendingAnalysisEntry(id: $0.key, version: $0.value) }
+            .sorted { $0.id < $1.id }
+        guard let data = try? JSONEncoder().encode(entries) else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
+    private func decodePendingAnalysis(_ text: String?) -> [String: Date?] {
+        guard let text, let data = text.data(using: .utf8),
+              let entries = try? JSONDecoder().decode([PendingAnalysisEntry].self, from: data) else {
+            return [:]
+        }
+        var result: [String: Date?] = [:]
+        result.reserveCapacity(entries.count)
+        for entry in entries {
+            result[entry.id] = entry.version
+        }
+        return result
+    }
+
+    private func syncPendingAnalysisSnapshotOnQueue() {
+        snapshotLock.lock()
+        pendingAnalysisSnapshot = pendingAnalysis
+        snapshotLock.unlock()
+    }
+
+    /// 登记一批待分析资产（相册新增/修改/删除）。
+    ///
+    /// - `records`：新增或被修改后的最新元数据，按指定版本入账；
+    /// - `removedIDs`：已从相册消失的资产 id，版本记 nil（只表示"要重算"）。
+    ///
+    /// 已存在同一 id 时**取更新后的版本**：多次变更叠加时以最后一次为准。
+    private func markPendingAnalysisOnQueue(
+        records: [AssetRecord],
+        removedIDs: [String]
+    ) {
+        for record in records {
+            pendingAnalysis[record.localIdentifier] = record.modificationDate
+        }
+        for id in removedIDs where pendingAnalysis[id] == nil {
+            pendingAnalysis[id] = Date?.none
+        }
+    }
+
+    /// 清掉已经重新分析完成的欠账。只删除版本与当前相册一致的项——
+    /// 若资产在这之间又被改过，欠账必须保留，否则会出现"声明已更新但结果仍旧"。
+    private func clearPendingAnalysisIfSatisfiedOnQueue(using records: [AssetRecord]) {
+        guard !pendingAnalysis.isEmpty else { return }
+        let currentByID = Dictionary(
+            records.map { ($0.localIdentifier, $0.modificationDate) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        var resolved = Set<String>()
+        for (id, version) in pendingAnalysis {
+            guard let currentVersion = currentByID[id] else {
+                // 资产彻底消失且已经不在当前快照里 → 欠账视为完成。
+                resolved.insert(id)
+                continue
+            }
+            if currentVersion == version {
+                resolved.insert(id)
+            }
+        }
+        guard !resolved.isEmpty else { return }
+        for id in resolved {
+            pendingAnalysis[id] = nil
+        }
+    }
+
+    /// 判断某个 id 是否仍在待分析欠账里（供增量重算范围判定）。
+    private func isPendingAnalysisOnQueue(_ id: String) -> Bool {
+        pendingAnalysis[id] != nil
     }
 
     private func snapshotRoundOnQueue() -> String {
@@ -971,8 +1221,33 @@ final class ScanningEngine: ScanningEngineProtocol {
             fetchedRecords = currentRecords
 
             if metadataChanged {
-                guard database.removeAllFeatureprints(),
-                      database.clearAutomaticDeleteDecisions() else {
+                // 增量销毁而不是无条件全清：只删掉"版本对不上"的那些资产特征。
+                // 杀进程续扫时大部分资产往往完全没变，把它们的 hash/embedding/score
+                // 也清掉会让用户白等一整轮重算。
+                //
+                // 没有可比对的旧快照（旧版本升级/手工断点）才退回全清——
+                // 此时无法证明任何一条特征仍属于当前相册内容。
+                let purgeSucceeded: Bool
+                if let savedRecords {
+                    let currentByID = Dictionary(
+                        currentRecords.map { ($0.localIdentifier, $0) },
+                        uniquingKeysWith: { first, _ in first }
+                    )
+                    let staleIDs = savedRecords.compactMap { saved -> String? in
+                        guard let now = currentByID[saved.localIdentifier] else {
+                            // 已从相册删除：特征必须清掉。
+                            return saved.localIdentifier
+                        }
+                        return saved.matches(now) ? nil : saved.localIdentifier
+                    }
+                    purgeSucceeded = staleIDs.isEmpty
+                        || (database.removeFeatureprints(assetIds: staleIDs)
+                            && database.clearAutomaticDeleteDecisions(assetIds: staleIDs))
+                } else {
+                    purgeSucceeded = database.removeAllFeatureprints()
+                        && database.clearAutomaticDeleteDecisions()
+                }
+                guard purgeSucceeded else {
                     setPersistenceErrorOnQueue("旧分析结果清理失败，请检查存储空间后重试")
                     pauseForPersistenceFailureOnQueue()
                     return
@@ -1014,6 +1289,17 @@ final class ScanningEngine: ScanningEngineProtocol {
         stageCursors = [:]
         stageAssetVersions = [:]
         expiredAssetIDs = []
+        // 本轮真正跑完（done）时结算待分析欠账：只有在这批资产的最新版本
+        // 确实被重新分析完成后才销账。版本又变了则欠账保留，下一轮继续。
+        if machine.phase == .done {
+            let before = pendingAnalysis.count
+            clearPendingAnalysisIfSatisfiedOnQueue(using: fetchedRecords)
+            if pendingAnalysis.count != before {
+                // 销账后结果集才可能变为"完整"，需要重新落盘 complete 标记。
+                _ = persistSnapshotsOnQueue()
+            }
+            syncPendingAnalysisSnapshotOnQueue()
+        }
         // 回调只服务当前一轮；清掉闭包，避免 SwiftUI View 被引擎长期持有形成引用链。
         snapshotLock.lock()
         progressHandler = nil
@@ -2077,6 +2363,8 @@ final class ScanningEngine: ScanningEngineProtocol {
             changedIDs.contains($0.record.localIdentifier)
         }
         snapshotLock.unlock()
+        // 变更后的结果集不再是"完整"状态：待分析欠账已在调用方登记，
+        // 这里一并落盘，保证重启后仍能差量恢复而不是误判为已扫描完成。
         _ = persistSnapshotsOnQueue()
     }
 

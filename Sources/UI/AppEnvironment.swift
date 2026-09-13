@@ -116,9 +116,10 @@ final class AppEnvironment: ObservableObject, PhotoLibraryChangeObserving {
         return DailyInboxSummary(
             dayStart: dayStart,
             newAssetCount: database.countAssets(createdAtOrAfter: dayStart, before: dayEnd),
-            // 待确认数只来自当前有效建议集合。恢复尚未完成时显示 0，
-            // 页面同时由扫描状态提示“恢复中”，不再拿旧裁决数量冒充当前结果。
-            pendingDeletionCount: engine.state == .done && !engine.isRestoringResults
+            // 待确认数只在"结果集完整"时才给出：扫描到 done、恢复完毕、
+            // 且没有待分析欠账。任何一个条件不满足都可能拿到过期建议，
+            // 此时宁可显示 0，由页面提示"结果待更新"。
+            pendingDeletionCount: engine.isResultSetComplete
                 ? engine.pendingDeletionIDs.count
                 : 0,
             actionCount: database.countActions(atOrAfter: dayStart, before: dayEnd)
