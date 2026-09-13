@@ -158,6 +158,16 @@ final class ScanningEngine: ScanningEngineProtocol {
     private let maxImageDataCacheBytes = 32 * 1024 * 1024
     /// 冷启动开关（V1 无反馈历史恒 false → favoriteBoost 翻倍；反馈历史属 T14 后）。
     private let hasUserData: Bool
+    /// 批次大小覆写（测试专用）：让回归测试能强制分批，验证跨批累加组装的
+    /// 去重与顺序无关性。生产路径为 nil，一律走 `batchSize`。
+    private let batchSizeOverride: Int?
+
+    /// 本引擎实际使用的批次大小。批次大小只影响"每批做多少事"，
+    /// 不得影响最终结果，因此可以安全地被测试覆写。
+    private var batchSize: Int {
+        if let override = batchSizeOverride { return max(1, override) }
+        return max(1, AppConfig.scanBatchSize)
+    }
 
     /// fetching 阶段捕获的当轮快照与哈希/向量结果（仅 workQueue 上读写）。
     private var fetchedRecords: [AssetRecord] = []
@@ -236,6 +246,7 @@ final class ScanningEngine: ScanningEngineProtocol {
         assetExifReader: ((String) -> [String: Any]?)? = nil,
         exposureProbe: @escaping (Data) -> (over: Double, under: Double)? = { _ in nil },
         hasUserData: Bool = false,
+        batchSizeOverride: Int? = nil,
         workQueue: DispatchQueue = DispatchQueue(label: "com.aiphotoinbox.ScanningEngine", qos: .userInitiated)
     ) {
         self.photoLibrary = photoLibrary
@@ -250,6 +261,7 @@ final class ScanningEngine: ScanningEngineProtocol {
         self.assetExifReader = assetExifReader
         self.exposureProbe = exposureProbe
         self.hasUserData = hasUserData
+        self.batchSizeOverride = batchSizeOverride
         self.machine = ScanStateMachine(store: store)
         publishSnapshot()
 
@@ -1476,18 +1488,18 @@ final class ScanningEngine: ScanningEngineProtocol {
 
             guard machine.isActive else { return }
 
-            let didWork: Bool
+            let outcome: BatchOutcome
             switch machine.phase {
             case .fetching:
-                didWork = runFetchingBatch()
+                outcome = runFetchingBatch()
             case .hashing:
-                didWork = runHashingStage()
+                outcome = runHashingStage()
             case .embedding:
-                didWork = runEmbeddingStage()
+                outcome = runEmbeddingStage()
             case .clustering:
-                didWork = runClusteringStage()
+                outcome = runClusteringStage()
             case .scoring:
-                didWork = runScoringStage()
+                outcome = runScoringStage()
             case .idle, .done, .paused:
                 publishSnapshot()
                 reportProgress()
@@ -1497,13 +1509,37 @@ final class ScanningEngine: ScanningEngineProtocol {
             publishSnapshot()
             reportProgress()
 
-            guard didWork, machine.isActive else { return }
+            // 中止（暂停/失效/写盘失败）：立即返回，不再调度任何批次。
+            if case .interrupted = outcome { return }
+            // 阶段已完成：状态机相位可能已改变，回到循环顶部重新按新相位派发。
+            if case .stageFinished = outcome { continue }
+            // progressed：本批有进展且还有后续批次。若状态机已不再活动
+            // （例如本批正好推进到 done），同样结束本轮。
+            guard machine.isActive else { return }
         }
 
         // 这一轮用完了批次额度但阶段还没结束：把下一轮重新排到工作队列尾，
         // 让排队中的暂停请求与其它 async 变更处理先得到执行机会。
         guard machine.isActive else { return }
         scheduleNextBatchOnQueue()
+    }
+
+    /// 单次批次执行的结果。
+    ///
+    /// 之前这些函数只用 `Bool` 表达"是否还有后续批次"，把三种截然不同的
+    /// 情况压进同一个 `false`：阶段已全部完成、本轮被打断（暂停/失效/写盘
+    /// 失败）、以及"本批做完了但还有下一批"。驱动循环无法区分后两者，
+    /// 于是"还有下一批"会被当成"本轮结束"提前收工（T03/T04 补充验收
+    /// 里 `scoring` 停住不动的直接原因）。
+    private enum BatchOutcome {
+        /// 本批完成，且本阶段还有后续批次可继续调度。
+        case progressed
+        /// 本阶段已全部完成（可能已推进到下一阶段或 done）。驱动循环应继续
+        /// 检查状态机，但不再把这一批算作"有工作量"。
+        case stageFinished
+        /// 本轮已中止：暂停、相册失效或写盘失败。驱动循环必须立即返回，
+        /// 不得再调度任何批次。
+        case interrupted
     }
 
     /// 把下一批重新排到工作队列尾。与直接调用相比，这保证同队列上排队中的
@@ -1549,10 +1585,11 @@ final class ScanningEngine: ScanningEngineProtocol {
 
     /// fetching：拉全库元数据 → 落盘 → 按批次汇报进度。
     ///
-    /// 返回 true 表示本批完成、还有后续批次可调度；返回 false 表示
-    /// 整个阶段已完成、或中途被打断（暂停/持久化失败/失效）。
+    /// 返回 `.progressed` 表示本批完成、还有后续批次可调度；
+    /// `.stageFinished` 表示整个 fetching 阶段已完成并已推进；
+    /// `.interrupted` 表示被暂停/写盘失败中止。
     @discardableResult
-    private func runFetchingBatch() -> Bool {
+    private func runFetchingBatch() -> BatchOutcome {
         // 首批：拉全库元数据并清空上一轮中间结果。
         if fetchCursor == 0 {
             let assets = uniqueRecords(
@@ -1569,7 +1606,7 @@ final class ScanningEngine: ScanningEngineProtocol {
             // 空库：直接推进，不留游标。
             fetchCursor = 0
             completeFetchingStage()
-            return true
+            return .stageFinished
         }
 
         // 本轮资产版本基线。后续所有阶段写库前都用它校验资产未被修改，
@@ -1579,13 +1616,12 @@ final class ScanningEngine: ScanningEngineProtocol {
         )
         expiredAssetIDs = []
 
-        let batchSize = max(1, AppConfig.scanBatchSize)
         let end = min(fetchCursor + batchSize, assets.count)
         for index in fetchCursor..<end {
             if consumePauseRequest() {
                 _ = pauseCheckedOnQueue(reason: "用户暂停")
                 fetchCursor = index
-                return false
+                return .interrupted
             }
             machine.setProgress(Double(index + 1) / Double(max(assets.count, 1)))
         }
@@ -1593,10 +1629,10 @@ final class ScanningEngine: ScanningEngineProtocol {
         publishSnapshot()
         reportProgress()
 
-        guard fetchCursor >= assets.count else { return true }
+        guard fetchCursor >= assets.count else { return .progressed }
         fetchCursor = 0
         completeFetchingStage()
-        return true
+        return .stageFinished
     }
 
     /// fetching 阶段收尾：落盘资产快照 → 保存全量记录 → 推进阶段。
@@ -1626,9 +1662,9 @@ final class ScanningEngine: ScanningEngineProtocol {
     /// 阶段末用 (时间×地理×pHash) 产出候选组。无注入实现时空转推进（占位语义保留）。
     /// 已持久化的当前版本哈希直接复用（杀进程续扫不重算）。
     ///
-    /// 每次调用只处理 [`AppConfig.scanBatchSize`] 张资产：本阶段的**内层**
+    /// 每次调用只处理 [`batchSize`] 张资产：本阶段的**内层**
     /// 工作量与外围循环一样有上界，暂停/变更通知在批次边界即可生效。
-    private func runHashingStage() -> Bool {
+    private func runHashingStage() -> BatchOutcome {
         let phase = ScanPhase.hashing
         let total = max(fetchedRecords.count, 1)
 
@@ -1644,7 +1680,7 @@ final class ScanningEngine: ScanningEngineProtocol {
         }
 
         let start = min(cursorOnQueue(for: phase), fetchedRecords.count)
-        let end = min(start + max(1, AppConfig.scanBatchSize), fetchedRecords.count)
+        let end = min(start + batchSize, fetchedRecords.count)
         var pendingWrites: [FeatureprintWrite] = []
 
         // 本批先做一次资产版本校验：过期资产不参与计算，也不写库。
@@ -1662,13 +1698,13 @@ final class ScanningEngine: ScanningEngineProtocol {
                     assetVersion: record.modificationDate
                 ))
             }
-            if pendingWrites.count >= AppConfig.scanBatchSize {
+            if pendingWrites.count >= batchSize {
                 guard flushFeatureprintWritesOnQueue(
                     &pendingWrites,
                     failureMessage: "特征保存失败，请检查存储空间后重试"
                 ) else {
                     pauseForPersistenceFailureOnQueue()
-                    return false
+                    return .interrupted
                 }
             }
             throttleForThermalPressure()
@@ -1679,13 +1715,13 @@ final class ScanningEngine: ScanningEngineProtocol {
             failureMessage: "特征保存失败，请检查存储空间后重试"
         ) else {
             pauseForPersistenceFailureOnQueue()
-            return false
+            return .interrupted
         }
 
         if consumePauseRequest() {
             setCursorOnQueue(start, for: phase)
             _ = pauseCheckedOnQueue(reason: "用户暂停")
-            return false
+            return .interrupted
         }
 
         machine.setProgress(Double(end) / Double(total))
@@ -1694,8 +1730,8 @@ final class ScanningEngine: ScanningEngineProtocol {
 
         guard end >= fetchedRecords.count else {
             setCursorOnQueue(end, for: phase)
-            // 返回 true：还有后续批次可调度。
-            return true
+            // 还有后续批次可调度。
+            return .progressed
         }
 
         // 本阶段最后一批：组装候选组、推进阶段、清游标。
@@ -1703,13 +1739,13 @@ final class ScanningEngine: ScanningEngineProtocol {
         let groups = CandidateGrouper.groups(from: fetchedRecords, hashByID: hashByID)
         setCandidateGroupsSnapshot(groups)
 
-        return advanceOnQueue()
+        return advanceOnQueue() ? .stageFinished : .interrupted
     }
 
     /// embedding：对未被 pHash 组认领的资产计算特征向量（L2 归一化）→ 落表。
     /// 已持久化的当前版本向量直接复用。无注入实现时空转推进。
     /// 与 hashing 一样按批次切分内层工作。
-    private func runEmbeddingStage() -> Bool {
+    private func runEmbeddingStage() -> BatchOutcome {
         let phase = ScanPhase.embedding
 
         // 待处理集合在阶段内是稳定的：只依赖候选组与 fetchedRecords，
@@ -1731,7 +1767,7 @@ final class ScanningEngine: ScanningEngineProtocol {
         }
 
         let start = min(cursorOnQueue(for: phase), pending.count)
-        let end = min(start + max(1, AppConfig.scanBatchSize), pending.count)
+        let end = min(start + batchSize, pending.count)
         var pendingWrites: [FeatureprintWrite] = []
 
         for index in currentVersionIndicesOnQueue(pending, range: start..<end) {
@@ -1751,13 +1787,13 @@ final class ScanningEngine: ScanningEngineProtocol {
                     ))
                 }
             }
-            if pendingWrites.count >= AppConfig.scanBatchSize {
+            if pendingWrites.count >= batchSize {
                 guard flushFeatureprintWritesOnQueue(
                     &pendingWrites,
                     failureMessage: "特征保存失败，请检查存储空间后重试"
                 ) else {
                     pauseForPersistenceFailureOnQueue()
-                    return false
+                    return .interrupted
                 }
             }
             throttleForThermalPressure()
@@ -1768,13 +1804,13 @@ final class ScanningEngine: ScanningEngineProtocol {
             failureMessage: "特征保存失败，请检查存储空间后重试"
         ) else {
             pauseForPersistenceFailureOnQueue()
-            return false
+            return .interrupted
         }
 
         if consumePauseRequest() {
             setCursorOnQueue(start, for: phase)
             _ = pauseCheckedOnQueue(reason: "用户暂停")
-            return false
+            return .interrupted
         }
 
         machine.setProgress(Double(end) / Double(total))
@@ -1783,19 +1819,19 @@ final class ScanningEngine: ScanningEngineProtocol {
 
         guard end >= pending.count else {
             setCursorOnQueue(end, for: phase)
-            return true
+            return .progressed
         }
 
         clearCursorOnQueue(for: phase)
-        return advanceOnQueue()
+        return advanceOnQueue() ? .stageFinished : .interrupted
     }
 
     /// clustering：在 (时间桶 × 地理单元) 内对 embedding 做阈值连通分量，
     /// ≥2 成员的分量并入候选组（pHash 已认领的资产不重复进组）。确定性输出。
     ///
     /// 连通分量本身是单元内的一次计算，无法在单元中间安全切分；因此按
-    /// **时间×地理单元**分批，每批处理 [`AppConfig.scanBatchSize`] 个单元。
-    private func runClusteringStage() -> Bool {
+    /// **时间×地理单元**分批，每批处理 [`batchSize`] 个单元。
+    private func runClusteringStage() -> BatchOutcome {
         let phase = ScanPhase.clustering
         let units = CandidateGrouper.timeGeoUnits(from: fetchedRecords)
         let total = max(units.count, 1)
@@ -1806,7 +1842,7 @@ final class ScanningEngine: ScanningEngineProtocol {
         }
 
         let start = min(cursorOnQueue(for: phase), units.count)
-        let end = min(start + max(1, AppConfig.scanBatchSize), units.count)
+        let end = min(start + batchSize, units.count)
 
         // 累加式组装：每批在已有的候选组上追加本批的 embedding 连通分量。
         // 与一次性全量重算等价（后批看到的 claimed 集合更大），且每批有界。
@@ -1844,7 +1880,7 @@ final class ScanningEngine: ScanningEngineProtocol {
         if consumePauseRequest() {
             setCursorOnQueue(start, for: phase)
             _ = pauseCheckedOnQueue(reason: "用户暂停")
-            return false
+            return .interrupted
         }
 
         machine.setProgress(Double(end) / Double(total))
@@ -1853,26 +1889,32 @@ final class ScanningEngine: ScanningEngineProtocol {
 
         guard end >= units.count else {
             setCursorOnQueue(end, for: phase)
-            return true
+            return .progressed
         }
 
         clearCursorOnQueue(for: phase)
-        return advanceOnQueue()
+        return advanceOnQueue() ? .stageFinished : .interrupted
     }
 
     /// scoring：逐组跑 GroupScoring（KeepScore 接线 + 冗余度 + SafetyRules 过滤）
     /// → Best Shot 标记 → 预删除候选集。缺特征的资产按中性值参与评分。
     ///
-    /// 本阶段每批只评 [`AppConfig.scanBatchSize`] 个组。组间互不依赖，
+    /// 本阶段每批只评 [`batchSize`] 个组。组间互不依赖，
     /// 已评组累加进快照；标签保留在阶段末的检测 pass 里执行（它们需要
     /// 完整候选组集合，且各自也按批次推进）。
-    private func runScoringStage() -> Bool {
+    private func runScoringStage() -> BatchOutcome {
         let phase = ScanPhase.scoring
         guard let protectedIDs = keepDecisionIDsOnQueue() else {
             pauseForSafetyFailureOnQueue()
-            return false
+            return .interrupted
         }
         keepDecisionIDsForRun = protectedIDs
+
+        // 重入判定：评分组已全部评完（只剩检测 pass 未跑完）时，直接跳到
+        // 检测 pass，不要重新评分。
+        if cursorOnQueue(for: Self.scoringGroupsDoneKey) == 1 {
+            return runScoringDetectionPassesOnQueue()
+        }
 
         // 首批：载入已持久化分数，并清空上一轮评分快照。
         if cursorOnQueue(for: phase) == 0 {
@@ -1892,7 +1934,7 @@ final class ScanningEngine: ScanningEngineProtocol {
         let groups = candidateGroupsOnQueue()
         let total = max(groups.count, 1)
         let start = min(cursorOnQueue(for: phase), groups.count)
-        let end = min(start + max(1, AppConfig.scanBatchSize), groups.count)
+        let end = min(start + batchSize, groups.count)
         var scored = scoredGroupsOnQueue()
 
         for index in start..<end {
@@ -1926,7 +1968,7 @@ final class ScanningEngine: ScanningEngineProtocol {
                 ) else {
                     setPersistenceErrorOnQueue("评分保存失败，请检查存储空间后重试")
                     pauseForPersistenceFailureOnQueue()
-                    return false
+                    return .interrupted
                 }
             }
 
@@ -1954,7 +1996,7 @@ final class ScanningEngine: ScanningEngineProtocol {
         if consumePauseRequest() {
             setCursorOnQueue(start, for: phase)
             _ = pauseCheckedOnQueue(reason: "用户暂停")
-            return false
+            return .interrupted
         }
 
         machine.setProgress(Double(end) / Double(total))
@@ -1963,28 +2005,52 @@ final class ScanningEngine: ScanningEngineProtocol {
 
         guard end >= groups.count else {
             setCursorOnQueue(end, for: phase)
-            return true
+            return .progressed
         }
 
+        // 组已全部评完：置位子游标，使后续重入直接进入检测 pass。
+        // 评分主游标清零（本阶段组维度工作确实做完了），但"组已评完"
+        // 这一事实由 scoringGroupsDoneKey 独立记录，不会因清零而丢失。
         clearCursorOnQueue(for: phase)
-        guard detectLowQuality() else { return false }
-        guard detectLargeMedia() else { return false }
+        setCursorOnQueue(1, for: Self.scoringGroupsDoneKey)
+        return runScoringDetectionPassesOnQueue()
+    }
+
+    /// scoring 阶段末的两个检测 pass（低质量 / 大媒体）+ 快照落盘 + 阶段推进。
+    ///
+    /// 抽成独立函数是因为它会被驱动循环**重入**：两个 pass 各自按批推进，
+    /// 未跑完时返回 `.progressed`，下一轮从这里继续，而不是重新评分。
+    private func runScoringDetectionPassesOnQueue() -> BatchOutcome {
+        switch detectLowQuality() {
+        case .interrupted: return .interrupted
+        case .progressed:  return .progressed
+        case .stageFinished: break
+        }
+
+        switch detectLargeMedia() {
+        case .interrupted: return .interrupted
+        case .progressed:  return .progressed
+        case .stageFinished: break
+        }
+
         guard persistSnapshotsOnQueue() else {
             pauseForPersistenceFailureOnQueue()
-            return false
+            return .interrupted
         }
 
         // 阶段切换与最终结果必须在同一轮内都成功：状态机落盘失败时
         // 不能声明扫描完成，否则重启后会读到"done 但结果快照是上一轮的"
         // 这种不一致状态。
-        guard advanceOnQueue() else { return false }
+        guard advanceOnQueue() else { return .interrupted }
         // 结果集完整标记（complete=1）在进入 done 之后才写，
         // 避免恢复流程接受一个在最终阶段切换前拍下的快照。
         guard persistSnapshotsOnQueue() else {
             pauseForPersistenceFailureOnQueue()
-            return false
+            return .interrupted
         }
-        return true
+        // 阶段完成：清掉评分子游标，保证下一轮扫描从干净状态开始。
+        clearCursorOnQueue(for: Self.scoringGroupsDoneKey)
+        return .stageFinished
     }
 
     /// 低质量检测 pass（T16）：未被相似组认领的 image 资产，clarity 阈值 +
@@ -1993,17 +2059,16 @@ final class ScanningEngine: ScanningEngineProtocol {
     /// 资产不再自动改写。
     /// 成本注记：每个未认领资产多一次缩略图读取（曝光探测）；V1 先正确后省，
     /// 大库优化属后续迭代（可与 hashing 阶段合并采样）。
-    private func detectLowQuality() -> Bool {
-        let phase = ScanPhase.scoring
+    private func detectLowQuality() -> BatchOutcome {
         let claimed = Set(candidateGroupsOnQueue().flatMap(\.memberIDs))
         guard let protectedIDs = keepDecisionIDsForRun else {
             pauseForSafetyFailureOnQueue()
-            return false
+            return .interrupted
         }
 
         let total = max(fetchedRecords.count, 1)
         let start = min(cursorOnQueue(for: Self.lowQualityPassKey), fetchedRecords.count)
-        let end = min(start + max(1, AppConfig.scanBatchSize), fetchedRecords.count)
+        let end = min(start + batchSize, fetchedRecords.count)
         var detected = start == 0 ? [] : lowQualitySnapshotOnQueue()
 
         for index in start..<end {
@@ -2086,7 +2151,7 @@ final class ScanningEngine: ScanningEngineProtocol {
                 ) else {
                     setPersistenceErrorOnQueue("低质量裁决保存失败，请检查存储空间后重试")
                     pauseForPersistenceFailureOnQueue()
-                    return false
+                    return .interrupted
                 }
             }
             throttleForThermalPressure()
@@ -2099,7 +2164,7 @@ final class ScanningEngine: ScanningEngineProtocol {
         if consumePauseRequest() {
             setCursorOnQueue(start, for: Self.lowQualityPassKey)
             _ = pauseCheckedOnQueue(reason: "用户暂停")
-            return false
+            return .interrupted
         }
         machine.setProgress(Double(end) / Double(total))
         publishSnapshot()
@@ -2107,20 +2172,22 @@ final class ScanningEngine: ScanningEngineProtocol {
 
         guard end >= fetchedRecords.count else {
             setCursorOnQueue(end, for: Self.lowQualityPassKey)
-            return false  // 检测 pass 未跑完，本批次到此为止
+            // 检测 pass 未跑完，还有下一批：必须表达成 .progressed，
+            // 否则驱动循环会当成"本阶段结束"而提前收工。
+            return .progressed
         }
         clearCursorOnQueue(for: Self.lowQualityPassKey)
-        return true
+        return .stageFinished
     }
 
     /// 大媒体清理 pass（T17）：估算体积 ≥ 阈值、未被相似组认领的资产
     /// （收藏/编辑过由 LargeMediaFilter 内部红线过滤）。裁决幂等口径与
     /// 低质量 pass 一致：用户 keep 不改写。估算值同步落 assets.estimated_bytes。
-    private func detectLargeMedia() -> Bool {
+    private func detectLargeMedia() -> BatchOutcome {
         let claimed = Set(candidateGroupsOnQueue().flatMap(\.memberIDs))
         guard let protectedIDs = keepDecisionIDsForRun else {
             pauseForSafetyFailureOnQueue()
-            return false
+            return .interrupted
         }
         let candidates = LargeMediaFilter.candidates(
             from: fetchedRecords,
@@ -2138,7 +2205,7 @@ final class ScanningEngine: ScanningEngineProtocol {
 
         let total = max(safeCandidates.count, 1)
         let start = min(cursorOnQueue(for: Self.largeMediaPassKey), safeCandidates.count)
-        let end = min(start + max(1, AppConfig.scanBatchSize), safeCandidates.count)
+        let end = min(start + batchSize, safeCandidates.count)
         // 累加进快照：每一批的检测结果都要保留，否则多批之后只剩最后一批。
         var detected = start == 0 ? [] : largeMediaSnapshotOnQueue()
 
@@ -2161,7 +2228,7 @@ final class ScanningEngine: ScanningEngineProtocol {
                 ) else {
                     setPersistenceErrorOnQueue("大媒体裁决保存失败，请检查存储空间后重试")
                     pauseForPersistenceFailureOnQueue()
-                    return false
+                    return .interrupted
                 }
             }
             throttleForThermalPressure()
@@ -2174,7 +2241,7 @@ final class ScanningEngine: ScanningEngineProtocol {
         if consumePauseRequest() {
             setCursorOnQueue(start, for: Self.largeMediaPassKey)
             _ = pauseCheckedOnQueue(reason: "用户暂停")
-            return false
+            return .interrupted
         }
         machine.setProgress(Double(end) / Double(total))
         publishSnapshot()
@@ -2182,10 +2249,11 @@ final class ScanningEngine: ScanningEngineProtocol {
 
         guard end >= safeCandidates.count else {
             setCursorOnQueue(end, for: Self.largeMediaPassKey)
-            return false  // 检测 pass 未跑完，本批次到此为止
+            // 还有下一批：必须表达成 .progressed。
+            return .progressed
         }
         clearCursorOnQueue(for: Self.largeMediaPassKey)
-        return true
+        return .stageFinished
     }
 
     /// 原子读取并清零暂停请求。返回置位前的值。
@@ -2321,6 +2389,12 @@ final class ScanningEngine: ScanningEngineProtocol {
     }
 
     /// scoring 阶段内部的低质量检测 pass 游标键（非 ScanPhase 成员）。
+    /// scoring 阶段内的子游标：标记"组已全部评完"。
+    ///
+    /// 两个检测 pass 各自按批推进，未跑完时驱动循环会重入 `runScoringStage()`。
+    /// 若只用 scoring 主游标，重入时它已被清零，评分会从第 0 组重来。
+    /// 因此评分组进度用独立键记录，重入时直接跳过评分、继续跑检测 pass。
+    private static let scoringGroupsDoneKey = "scoring.groupsDone"
     private static let lowQualityPassKey = "scoring.lowQuality"
     /// scoring 阶段内部的大媒体检测 pass 游标键（非 ScanPhase 成员）。
     private static let largeMediaPassKey = "scoring.largeMedia"
