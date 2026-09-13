@@ -130,4 +130,97 @@ final class ScanStateMachineTests: XCTestCase {
         machine.setProgress(0.5) // idle 阶段：忽略
         XCTAssertEqual(machine.progress, 0)
     }
+
+    // MARK: 事务与错误处理（T07 补充验收）
+
+    /// 注入写入失败：阶段切换不得成功，内存状态必须回滚到写入前。
+    /// 恢复后只能读到"完整的旧状态"或"完整的新状态"，不能是半套。
+    func testAdvanceFailsAndRollsBackWhenPhaseWriteFails() {
+        let store = InMemoryKeyValueStore()
+        let machine = ScanStateMachine(store: store)
+        XCTAssertTrue(machine.advance())          // idle → fetching
+        XCTAssertEqual(machine.phase, .fetching)
+
+        // 让阶段写入全部失败（模拟磁盘满 / 事务中断）。
+        store.failingKeys = ["scan.phase"]
+
+        XCTAssertFalse(machine.advance(), "写盘失败时不得声明阶段切换成功")
+        XCTAssertEqual(machine.phase, .fetching, "失败必须回滚到写入前的阶段")
+        XCTAssertNotNil(machine.lastPersistenceError)
+
+        // 恢复后只能读到完整的旧状态（fetching），不能读到 hashing。
+        let revived = ScanStateMachine(store: store)
+        XCTAssertEqual(revived.phase, .fetching)
+    }
+
+    /// 暂停失败时不得让内存进入 paused：否则 UI 显示已暂停、
+    /// 但"暂停前阶段"从未落盘，恢复会退化成从头重扫。
+    func testPauseFailsAndKeepsActivePhaseWhenWriteFails() {
+        let store = InMemoryKeyValueStore()
+        let machine = ScanStateMachine(store: store)
+        XCTAssertTrue(machine.advance())          // fetching
+        store.failingKeys = ["scan.phase"]
+
+        XCTAssertFalse(machine.pause(reason: "用户暂停"))
+        XCTAssertEqual(machine.phase, .fetching, "失败时内存不得进入 paused")
+        XCTAssertTrue(machine.isActive)
+    }
+
+    /// 版本不符触发基线写入失败：内存仍安全回到 idle，并暴露错误。
+    func testFeatureVersionMismatchReportsWhenBaselineWriteFails() {
+        let store = InMemoryKeyValueStore(prepopulated: [
+            "scan.featureVersion": "999",
+            "scan.phase": "",
+            "scan.progress": "0.5",
+        ])
+        store.failingKeys = ["scan.phase"]
+
+        let machine = ScanStateMachine(store: store)
+        XCTAssertEqual(machine.phase, .idle, "无法写入基线也必须安全回到 idle")
+        XCTAssertNotNil(machine.lastPersistenceError, "初始化写入失败要如实暴露")
+    }
+
+    /// 进度写入失败不得推进内部基线：否则后续真实写入会被节流掉，
+    /// 造成"以为存了、其实没存"。
+    func testProgressBaselineNotAdvancedWhenWriteFails() {
+        let store = InMemoryKeyValueStore()
+        let machine = ScanStateMachine(store: store)
+        XCTAssertTrue(machine.advance())          // fetching
+
+        store.failingKeys = ["scan.progress"]
+        // force=true 路径（进度到 1）会尝试写入并失败。
+        machine.setProgress(1)
+        XCTAssertNotNil(machine.lastPersistenceError)
+
+        // 解除失败后同一进度必须再尝试写入并成功。
+        store.failingKeys = []
+        store.writeAttempts.removeAll()
+        machine.setProgress(0)
+        XCTAssertTrue(
+            store.writeAttempts.contains("scan.progress"),
+            "失败后基线未前进，同一进度应重新写入"
+        )
+        let revived = ScanStateMachine(store: store)
+        XCTAssertEqual(revived.phase, .fetching)
+        XCTAssertEqual(revived.progress, 0, accuracy: 1e-9)
+    }
+
+    /// 阶段、进度、暂停前阶段必须落在同一次原子提交里：
+    /// 不能出现"阶段已切、进度还是旧值"的中间态。
+    func testPauseCommitsPhaseAndProgressTogether() {
+        let store = InMemoryKeyValueStore()
+        let machine = ScanStateMachine(store: store)
+        XCTAssertTrue(machine.advance())          // fetching
+        XCTAssertTrue(machine.advance())          // hashing
+        machine.setProgress(0.6)
+        XCTAssertTrue(machine.pause(reason: "手动暂停"))
+
+        // 任一键写入失败，整批都不应生效。
+        let revived = ScanStateMachine(store: store)
+        XCTAssertEqual(revived.phase, .paused(failReason: "手动暂停"))
+        XCTAssertEqual(revived.progress, 0.6, accuracy: 1e-9)
+        XCTAssertTrue(revived.resume())
+        XCTAssertEqual(revived.phase, .hashing, "暂停前阶段必须与暂停同批落盘")
+        XCTAssertEqual(revived.progress, 0.6, accuracy: 1e-9)
+    }
 }

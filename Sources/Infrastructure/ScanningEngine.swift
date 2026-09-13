@@ -591,12 +591,24 @@ final class ScanningEngine: ScanningEngineProtocol {
             case .done:
                 // 上一轮已完成 → 全新重扫：复位状态机并清当轮内存快照。
                 // （此前该路径静默返回，UI 会永远停在"启动中…"——真机复现的卡死 bug。）
-                self.machine.reset()
+                // 复位写盘失败同样不能继续：否则新一轮的结果会挂在一个
+                // 没保存下来的旧 done 阶段上。
+                guard self.machine.reset() else {
+                    self.setPersistenceErrorOnQueue(
+                        self.machine.lastPersistenceError ?? "扫描状态复位失败，请检查存储空间后重试"
+                    )
+                    return
+                }
                 self.clearRunSnapshots()
                 self.beginNewSnapshotRoundOnQueue()
             case .paused:
                 // 暂停中的"继续扫描"= 原地续跑，保留断点（此前同样会静默返回）。
-                guard self.machine.resume() else { return }
+                guard self.machine.resume() else {
+                    self.setPersistenceErrorOnQueue(
+                        self.machine.lastPersistenceError ?? "扫描状态恢复失败，请检查存储空间后重试"
+                    )
+                    return
+                }
                 self.publishSnapshot()
                 self.reportProgress()
             default:
@@ -699,7 +711,7 @@ final class ScanningEngine: ScanningEngineProtocol {
 
     private func pauseForSafetyFailureOnQueue() {
         if machine.isActive {
-            machine.pause(reason: "无法读取用户保留记录")
+            pauseCheckedOnQueue(reason: "无法读取用户保留记录")
         }
         publishSnapshot()
         reportProgress()
@@ -708,7 +720,7 @@ final class ScanningEngine: ScanningEngineProtocol {
 
     private func pauseForPersistenceFailureOnQueue() {
         if machine.isActive {
-            machine.pause(reason: "扫描结果保存失败")
+            pauseCheckedOnQueue(reason: "扫描结果保存失败")
         }
         publishSnapshot()
         reportProgress()
@@ -767,7 +779,10 @@ final class ScanningEngine: ScanningEngineProtocol {
         guard let protectedIDs = keepDecisionIDsOnQueue() else {
             // 安全数据读不出来：不清结果（保留可见性），只暂停并报错。
             clearRunSnapshots(clearSafetyError: false)
-            _ = machine.reset()
+            if !machine.reset(), let error = machine.lastPersistenceError {
+                // 复位写盘失败：内存已回到 idle，如实暴露错误让用户重试。
+                setPersistenceErrorOnQueue(error)
+            }
             publishSnapshot()
             notifyResultsChanged()
             return
@@ -925,7 +940,9 @@ final class ScanningEngine: ScanningEngineProtocol {
         clearRunSnapshots()
         pendingAnalysis = [:]
         syncPendingAnalysisSnapshotOnQueue()
-        _ = machine.reset()
+        if !machine.reset(), let error = machine.lastPersistenceError {
+            setPersistenceErrorOnQueue(error)
+        }
         publishSnapshot()
         notifyResultsChanged()
     }
@@ -1176,7 +1193,12 @@ final class ScanningEngine: ScanningEngineProtocol {
     func resume() {
         workQueue.async { [weak self] in
             guard let self else { return }
-            guard self.machine.resume() else { return }
+            guard self.machine.resume() else {
+                if let error = self.machine.lastPersistenceError {
+                    self.setPersistenceErrorOnQueue(error)
+                }
+                return
+            }
             self.publishSnapshot()
             self.reportProgress()
             self.snapshotLock.lock()
@@ -1190,9 +1212,10 @@ final class ScanningEngine: ScanningEngineProtocol {
 
     private func startDrivingOnQueue() {
         // idle 引导：全新/重置后的扫描从这里迈出第一步。
+        // 阶段推进写盘失败就不能继续往下跑——否则后面整轮都建立在
+        // 一个没有真正保存的阶段上，崩溃恢复会读回旧阶段造成混乱。
         if machine.phase == .idle {
-            machine.advance()
-            publishSnapshot()
+            guard advanceOnQueue() else { return }
         }
         // 杀进程续跑：中间镜像随进程消失，重拉并同步元数据，再从持久化特征重建。
         // fetching 完成时会先写入完整 AssetRecord 快照；若当前相册元数据已经
@@ -1254,7 +1277,16 @@ final class ScanningEngine: ScanningEngineProtocol {
                 }
                 clearRunSnapshots()
                 fetchedRecords = currentRecords
-                _ = machine.rewind(to: .hashing)
+                // 回退是恢复语义的一部分：写盘失败就必须停，不能带着
+                // 一个没保存的 hashing 阶段继续算，否则重启后阶段与
+                // 已清特征不匹配。
+                guard machine.rewind(to: .hashing) else {
+                    setPersistenceErrorOnQueue(
+                        machine.lastPersistenceError ?? "扫描阶段回退失败，请检查存储空间后重试"
+                    )
+                    pauseForPersistenceFailureOnQueue()
+                    return
+                }
             }
             guard persistAssetSnapshotOnQueue() else {
                 pauseForPersistenceFailureOnQueue()
@@ -1279,8 +1311,47 @@ final class ScanningEngine: ScanningEngineProtocol {
 
     /// 一轮扫描真正结束时收尾：清回调、处理挂起变更。
     /// 仅当状态机不再活动且没有待调度批次时执行。
+    /// 在 workQueue 上推进状态机阶段，并把"写盘失败"统一转成可见错误 + 暂停。
+    ///
+    /// 返回 false 表示**阶段没有真正切换到磁盘**：调用方必须立即停止本轮，
+    /// 不得继续调度下一批，也不得向 UI 声明扫描完成。
+    private func advanceOnQueue() -> Bool {
+        guard machine.advance() else {
+            if let error = machine.lastPersistenceError {
+                setPersistenceErrorOnQueue(error)
+                pauseForPersistenceFailureOnQueue()
+            }
+            return false
+        }
+        publishSnapshot()
+        reportProgress()
+        return true
+    }
+
+    /// 在 workQueue 上暂停状态机并回报写盘错误。
+    /// 写盘失败会让"暂停前阶段"无法保存，恢复时可能落到 fetching 重扫——
+    /// 这比静默继续安全，但要如实报错，不能假装暂停成功。
+    @discardableResult
+    private func pauseCheckedOnQueue(reason: String) -> Bool {
+        let paused = machine.pause(reason: reason)
+        if !paused, let error = machine.lastPersistenceError {
+            setPersistenceErrorOnQueue(error)
+        }
+        publishSnapshot()
+        reportProgress()
+        return paused
+    }
+
     private func finishDrivingIfNeededOnQueue() {
         guard isDriving, !machine.isActive, !isSchedulingNextBatch else { return }
+        // 状态机写盘失败时，本轮的阶段切换并没有真正保存下来。
+        // 这种情况不能当作扫描完成：向 UI 暴露持久化错误并暂停，
+        // 让用户释放空间后重试，而不是让重启后读到一个"半套"状态。
+        if let error = machine.lastPersistenceError {
+            setPersistenceErrorOnQueue(error)
+            pauseForPersistenceFailureOnQueue()
+            return
+        }
         isDriving = false
         fetchCursor = 0
         // 轮次收官：过期批次的判定基准随之复位。阶段游标与版本表只在
@@ -1352,7 +1423,11 @@ final class ScanningEngine: ScanningEngineProtocol {
             return !EmbeddingMath.isUsable(vector)
         }
         if hasMissingEmbedding {
-            _ = machine.rewind(to: .embedding)
+            if !machine.rewind(to: .embedding), let error = machine.lastPersistenceError {
+                setPersistenceErrorOnQueue(error)
+                pauseForPersistenceFailureOnQueue()
+                return
+            }
             setCandidateGroupsSnapshot(hashGroups)
             return
         }
@@ -1450,7 +1525,7 @@ final class ScanningEngine: ScanningEngineProtocol {
         // 扫描进行中收到相册变更：当前轮次的部分中间结果已不可信。
         // 先暂停，等下一轮 fetching 重新拉取元数据；不在这里静默继续。
         if machine.isActive {
-            machine.pause(reason: "相册已变更，等待重新扫描")
+            pauseCheckedOnQueue(reason: "相册已变更，等待重新扫描")
         }
         publishSnapshot()
         reportProgress()
@@ -1458,9 +1533,7 @@ final class ScanningEngine: ScanningEngineProtocol {
     }
 
     private func pauseOnQueue() {
-        machine.pause(reason: "用户暂停")
-        publishSnapshot()
-        reportProgress()
+        pauseCheckedOnQueue(reason: "用户暂停")
     }
 
     /// fetching：拉全库元数据 → 落盘 → 按批次汇报进度。
@@ -1499,7 +1572,7 @@ final class ScanningEngine: ScanningEngineProtocol {
         let end = min(fetchCursor + batchSize, assets.count)
         for index in fetchCursor..<end {
             if consumePauseRequest() {
-                machine.pause(reason: "用户暂停")
+                _ = pauseCheckedOnQueue(reason: "用户暂停")
                 fetchCursor = index
                 return false
             }
@@ -1520,7 +1593,7 @@ final class ScanningEngine: ScanningEngineProtocol {
         let assets = fetchedRecords
         let fetchedAt = Date()
         if consumePauseRequest() {
-            machine.pause(reason: "用户暂停")
+            _ = pauseCheckedOnQueue(reason: "用户暂停")
             return
         }
         // 全量快照同时负责清理相册外部删除但尚未收到 change observer 事件的旧行。
@@ -1535,9 +1608,7 @@ final class ScanningEngine: ScanningEngineProtocol {
             pauseForPersistenceFailureOnQueue()
             return
         }
-        machine.advance()
-        publishSnapshot()
-        reportProgress()
+        guard advanceOnQueue() else { return }
     }
 
     /// hashing：逐资产拉缩略图 → 计算 pHash → 落 featureprints 表；
@@ -1602,7 +1673,7 @@ final class ScanningEngine: ScanningEngineProtocol {
 
         if consumePauseRequest() {
             setCursorOnQueue(start, for: phase)
-            machine.pause(reason: "用户暂停")
+            _ = pauseCheckedOnQueue(reason: "用户暂停")
             return false
         }
 
@@ -1621,10 +1692,7 @@ final class ScanningEngine: ScanningEngineProtocol {
         let groups = CandidateGrouper.groups(from: fetchedRecords, hashByID: hashByID)
         setCandidateGroupsSnapshot(groups)
 
-        machine.advance()
-        publishSnapshot()
-        reportProgress()
-        return true
+        return advanceOnQueue()
     }
 
     /// embedding：对未被 pHash 组认领的资产计算特征向量（L2 归一化）→ 落表。
@@ -1694,7 +1762,7 @@ final class ScanningEngine: ScanningEngineProtocol {
 
         if consumePauseRequest() {
             setCursorOnQueue(start, for: phase)
-            machine.pause(reason: "用户暂停")
+            _ = pauseCheckedOnQueue(reason: "用户暂停")
             return false
         }
 
@@ -1708,10 +1776,7 @@ final class ScanningEngine: ScanningEngineProtocol {
         }
 
         clearCursorOnQueue(for: phase)
-        machine.advance()
-        publishSnapshot()
-        reportProgress()
-        return true
+        return advanceOnQueue()
     }
 
     /// clustering：在 (时间桶 × 地理单元) 内对 embedding 做阈值连通分量，
@@ -1767,7 +1832,7 @@ final class ScanningEngine: ScanningEngineProtocol {
 
         if consumePauseRequest() {
             setCursorOnQueue(start, for: phase)
-            machine.pause(reason: "用户暂停")
+            _ = pauseCheckedOnQueue(reason: "用户暂停")
             return false
         }
 
@@ -1781,10 +1846,7 @@ final class ScanningEngine: ScanningEngineProtocol {
         }
 
         clearCursorOnQueue(for: phase)
-        machine.advance()
-        publishSnapshot()
-        reportProgress()
-        return true
+        return advanceOnQueue()
     }
 
     /// scoring：逐组跑 GroupScoring（KeepScore 接线 + 冗余度 + SafetyRules 过滤）
@@ -1880,7 +1942,7 @@ final class ScanningEngine: ScanningEngineProtocol {
 
         if consumePauseRequest() {
             setCursorOnQueue(start, for: phase)
-            machine.pause(reason: "用户暂停")
+            _ = pauseCheckedOnQueue(reason: "用户暂停")
             return false
         }
 
@@ -1901,16 +1963,16 @@ final class ScanningEngine: ScanningEngineProtocol {
             return false
         }
 
-        machine.advance()
-        // Mark the already-written result set complete only after the state
-        // machine reaches done. This keeps restart recovery from accepting a
-        // snapshot captured just before the final phase transition.
+        // 阶段切换与最终结果必须在同一轮内都成功：状态机落盘失败时
+        // 不能声明扫描完成，否则重启后会读到"done 但结果快照是上一轮的"
+        // 这种不一致状态。
+        guard advanceOnQueue() else { return false }
+        // 结果集完整标记（complete=1）在进入 done 之后才写，
+        // 避免恢复流程接受一个在最终阶段切换前拍下的快照。
         guard persistSnapshotsOnQueue() else {
             pauseForPersistenceFailureOnQueue()
             return false
         }
-        publishSnapshot()
-        reportProgress()
         return true
     }
 
@@ -2025,7 +2087,7 @@ final class ScanningEngine: ScanningEngineProtocol {
 
         if consumePauseRequest() {
             setCursorOnQueue(start, for: Self.lowQualityPassKey)
-            machine.pause(reason: "用户暂停")
+            _ = pauseCheckedOnQueue(reason: "用户暂停")
             return false
         }
         machine.setProgress(Double(end) / Double(total))
@@ -2100,7 +2162,7 @@ final class ScanningEngine: ScanningEngineProtocol {
 
         if consumePauseRequest() {
             setCursorOnQueue(start, for: Self.largeMediaPassKey)
-            machine.pause(reason: "用户暂停")
+            _ = pauseCheckedOnQueue(reason: "用户暂停")
             return false
         }
         machine.setProgress(Double(end) / Double(total))

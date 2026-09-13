@@ -17,7 +17,8 @@ final class GRDBKeyValueStore: KeyValueStore {
         database.keyValue(forKey: key)
     }
 
-    func setString(_ value: String?, forKey key: String) {
+    @discardableResult
+    func setString(_ value: String?, forKey key: String) -> Bool {
         database.setKeyValue(value, forKey: key)
     }
 

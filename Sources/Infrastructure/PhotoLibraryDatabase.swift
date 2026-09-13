@@ -211,19 +211,32 @@ final class PhotoLibraryDatabase {
         }
     }
 
-    func setKeyValue(_ value: String?, forKey key: String) {
-        try? writer.write { db in
-            if let value {
-                try db.execute(
-                    sql: """
-                    INSERT INTO scan_state (key, value) VALUES (?, ?)
-                    ON CONFLICT(key) DO UPDATE SET value = excluded.value
-                    """,
-                    arguments: [key, value]
-                )
-            } else {
-                try db.execute(sql: "DELETE FROM scan_state WHERE key = ?", arguments: [key])
+    /// 写入单个键值。返回是否落盘成功。
+    ///
+    /// 这里刻意不再用 `try?` 静默吞掉错误：扫描状态/进度的写入结果是
+    /// 调用方判断"能否声明阶段切换成功"的依据，失败必须能被看到。
+    /// 需要单键写入又关心结果的调用方应检查返回值；
+    /// 需要多键一致性的调用方应改用 `setKeyValuesAtomically`。
+    @discardableResult
+    func setKeyValue(_ value: String?, forKey key: String) -> Bool {
+        guard !key.isEmpty else { return false }
+        do {
+            try writer.write { db in
+                if let value {
+                    try db.execute(
+                        sql: """
+                        INSERT INTO scan_state (key, value) VALUES (?, ?)
+                        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                        """,
+                        arguments: [key, value]
+                    )
+                } else {
+                    try db.execute(sql: "DELETE FROM scan_state WHERE key = ?", arguments: [key])
+                }
             }
+            return true
+        } catch {
+            return false
         }
     }
 
