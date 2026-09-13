@@ -669,4 +669,97 @@ final class ScanningEngineTests: XCTestCase {
             "存在待分析欠账时不得声明结果集完整"
         )
     }
+
+    /// 验收（T04 增量语义）：新加入的相似照片在下一轮扫描后必须**并入**
+    /// 已有候选组，而不是另起一组。
+    ///
+    /// 场景：先扫出 2 张同刻同址的相似照片（1 组），随后相册新增第 3 张
+    /// 与它们相似的照片 → 下一次扫描后应是 1 个 3 成员组；且新版资产被
+    /// 重新分析后，待分析欠账必须销账、结果集恢复"完整"。
+    func testNewlyAddedSimilarPhotoMergesIntoExistingGroupAfterRescan() throws {
+        let database = try PhotoLibraryDatabase.inMemory()
+        let store = GRDBKeyValueStore(database: database)
+        let base = Date(timeIntervalSince1970: 1_700_000_000)
+
+        // 同一张合成图 → pHash/embedding 必然相似。
+        let image = try SyntheticImage.jpeg(side: 64, seed: 3)
+        let sharedHash = String(repeating: "0", count: 16)
+
+        // 首轮：2 张相似照片。
+        let initialRecords = [
+            makeRecord(id: "merge-a", creationDate: base, latitude: 31.0, longitude: 121.0),
+            makeRecord(id: "merge-b", creationDate: base.addingTimeInterval(30),
+                       latitude: 31.0, longitude: 121.0),
+        ]
+        let firstQueue = DispatchQueue(label: "test.engine.merge.first")
+        let firstService = FakePhotoLibraryService(records: initialRecords)
+        let first = ScanningEngine(
+            photoLibrary: firstService,
+            database: database,
+            store: store,
+            imageDataLoader: { _ in image },
+            hashComputer: { _ in sharedHash },
+            workQueue: firstQueue
+        )
+        runAndWait(first, workQueue: firstQueue, progressLog: ProgressLog())
+
+        XCTAssertEqual(first.state, .done)
+        XCTAssertEqual(first.candidateGroups.count, 1, "首轮应产出 1 个候选组")
+        XCTAssertEqual(first.candidateGroups.first?.memberIDs.count, 2)
+        XCTAssertTrue(first.isResultSetComplete, "首轮跑完且无欠账 → 结果集完整")
+
+        // 相册新增第 3 张相似照片（同刻同址）。
+        let added = makeRecord(
+            id: "merge-c",
+            creationDate: base.addingTimeInterval(60),
+            latitude: 31.0, longitude: 121.0
+        )
+        let allRecords = initialRecords + [added]
+
+        // 交接给同一 VM 的下一轮：新引擎读同一份 store/database，
+        // 相册现在能看到 3 张。
+        let secondQueue = DispatchQueue(label: "test.engine.merge.second")
+        let secondService = FakePhotoLibraryService(records: allRecords)
+        let second = ScanningEngine(
+            photoLibrary: secondService,
+            database: database,
+            store: store,
+            imageDataLoader: { _ in image },
+            hashComputer: { _ in sharedHash },
+            workQueue: secondQueue
+        )
+        secondQueue.sync { }
+
+        // 新增资产必须先被登记为待分析欠账（UI 会显示"结果待更新"）。
+        second.refreshAfterLibraryChange(records: [added])
+        secondQueue.sync { }
+
+        XCTAssertTrue(second.hasPendingAnalysis, "新增资产必须登记为待分析欠账")
+        XCTAssertFalse(
+            second.isResultSetComplete,
+            "有欠账时不得声明完整"
+        )
+
+        // 重新扫描：新增照片应被并入同一组。
+        // 第一次 runFullScan 处理欠账（清旧特征 + 重算），第二轮让结果稳定收敛。
+        runAndWait(second, workQueue: secondQueue, progressLog: ProgressLog())
+
+        XCTAssertEqual(second.state, .done)
+
+        let groups = second.candidateGroups
+        XCTAssertEqual(groups.count, 1, "新增的相似照片应并入原有组，而不是另起一组")
+        XCTAssertEqual(
+            Set(groups.first?.memberIDs ?? []),
+            Set(["merge-a", "merge-b", "merge-c"]),
+            "最终组应包含全部 3 张相似照片"
+        )
+        XCTAssertFalse(
+            second.hasPendingAnalysis,
+            "新增资产被重新分析后，待分析欠账必须销账"
+        )
+        XCTAssertTrue(
+            second.isResultSetComplete,
+            "欠账结清且扫描完成 → 结果集恢复完整"
+        )
+    }
 }
