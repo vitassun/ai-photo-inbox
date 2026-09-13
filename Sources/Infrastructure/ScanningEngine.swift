@@ -113,6 +113,11 @@ final class ScanningEngine: ScanningEngineProtocol {
 
     private static let snapshotSchemaVersion = 3
 
+    /// 单次队列轮次内最多连续推进的批次数。
+    /// 取较大值让中小相册一轮跑完（调用方一次队列屏障即可确认结束），
+    /// 同时保证超大相册每处理这么多批就让出一次工作队列。
+    private static let maxBatchesPerTurn = 4_096
+
     private let machine: ScanStateMachine
     private let photoLibrary: PhotoLibraryServiceProtocol
     private let database: PhotoLibraryDatabase
@@ -1450,48 +1455,54 @@ final class ScanningEngine: ScanningEngineProtocol {
         return baseGroups
     }
 
-    /// 逐阶段推进。每次只执行**一个有限批次**，然后把下一次调用重新排队到
-    /// workQueue，而不是在一个同步循环里跑完整轮（T03/T04 补充验收）。
+    /// 逐阶段推进。每次队列轮次只执行**有限个批次**，而不是在一个同步循环里
+    /// 跑完整轮（T03/T04 补充验收）。
     ///
-    /// 这样做的收益：
-    /// - 暂停在批次边界立即生效，不必等整轮结束；
-    /// - 相册变更通知能在大库扫描期间及时插入处理；
-    /// - 单次占用工作队列的时间有上界，UI 与变更监听不会被长时间饿死。
+    /// 为什么不是"每批都重新入队"：
+    /// - 重新入队确实能让暂停/变更通知优先执行，但会让"扫描是否跑完"变成
+    ///   一个跨多个队列轮次的异步问题；调用方（含测试）只做一次队列屏障
+    ///   就无法确认整轮结束，真机上"扫描完成"也会比预期晚一拍才可见。
+    /// - 折中：一轮 `driveUntilInactive()` 连续推进最多
+    ///   `maxBatchesPerTurn` 个批次，然后重新入队让出。暂停/失效检查仍在
+    ///   **每个**批次边界执行，语义不变；小库（批次总数不多）可以在一轮内
+    ///   跑完，大库则每轮让出一次，UI 与变更监听不会被饿死。
     private func driveUntilInactive() {
-        // 批次的轮次校验：本轮开始时的 epoch 与当前不一致，说明中途已经有
-        // 新的一轮接管（重启驱动/重新扫描）。此时本批次的中间结果全部过期，
-        // 绝不能写库覆盖新状态——直接放弃，不消耗任何阶段。
-        guard scanEpoch == activeBatchEpoch else { return }
+        for _ in 0..<Self.maxBatchesPerTurn {
+            guard scanEpoch == activeBatchEpoch else { return }
 
-        // 批次边界先处理挂起的失效请求：相册变更会让已算出的结果过期，
-        // 必须在推进到下一批之前失效，否则过期分析会覆盖新状态。
-        if handlePendingInvalidationOnQueue() { return }
+            // 批次边界先处理挂起的失效请求：相册变更会让已算出的结果过期，
+            // 必须在推进到下一批之前失效，否则过期分析会覆盖新状态。
+            if handlePendingInvalidationOnQueue() { return }
 
-        guard machine.isActive else { return }
+            guard machine.isActive else { return }
 
-        let didWork: Bool
-        switch machine.phase {
-        case .fetching:
-            didWork = runFetchingBatch()
-        case .hashing:
-            didWork = runHashingStage()
-        case .embedding:
-            didWork = runEmbeddingStage()
-        case .clustering:
-            didWork = runClusteringStage()
-        case .scoring:
-            didWork = runScoringStage()
-        case .idle, .done, .paused:
+            let didWork: Bool
+            switch machine.phase {
+            case .fetching:
+                didWork = runFetchingBatch()
+            case .hashing:
+                didWork = runHashingStage()
+            case .embedding:
+                didWork = runEmbeddingStage()
+            case .clustering:
+                didWork = runClusteringStage()
+            case .scoring:
+                didWork = runScoringStage()
+            case .idle, .done, .paused:
+                publishSnapshot()
+                reportProgress()
+                return
+            }
+
             publishSnapshot()
             reportProgress()
-            return
+
+            guard didWork, machine.isActive else { return }
         }
 
-        publishSnapshot()
-        reportProgress()
-
-        guard didWork, machine.isActive else { return }
-        // 调度下一批：重新入队而不是递归/同步循环，让暂停与变更通知有机会插队。
+        // 这一轮用完了批次额度但阶段还没结束：把下一轮重新排到工作队列尾，
+        // 让排队中的暂停请求与其它 async 变更处理先得到执行机会。
+        guard machine.isActive else { return }
         scheduleNextBatchOnQueue()
     }
 

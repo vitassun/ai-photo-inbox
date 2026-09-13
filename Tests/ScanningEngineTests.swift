@@ -562,4 +562,111 @@ final class ScanningEngineTests: XCTestCase {
         XCTAssertEqual(engine.state, .done, "paused 下 runFullScan 必须续跑到 done")
         XCTAssertEqual(database.assetCount(), 6)
     }
+
+    // MARK: 分批调度（T03/T04 补充验收）
+
+    /// 批次大小远小于资产数时，扫描必须仍然跑完并落齐结果——
+    /// 分批只改变"每次占用队列多久"，不改变最终结果。
+    /// 这里通过把资产数做得比 scanBatchSize 大，让 fetching/hashing/
+    /// scoring 都必然跨多个批次。
+    func testBatchedSchedulingCompletesAcrossManyBatches() throws {
+        let database = try PhotoLibraryDatabase.inMemory()
+        let store = GRDBKeyValueStore(database: database)
+        let queue = DispatchQueue(label: "test.engine.batched")
+
+        // 250 张同刻同址照片 → 一组；跨多个批次（scanBatchSize = 100）。
+        let count = 250
+        var records: [AssetRecord] = []
+        for index in 0..<count {
+            records.append(makeRecord(
+                id: String(format: "batch-%03d", index),
+                creationDate: Date(timeIntervalSince1970: 1_700_000_000),
+                latitude: 31.0, longitude: 121.0
+            ))
+        }
+        let fakeService = FakePhotoLibraryService(records: records)
+        let engine = ScanningEngine(
+            photoLibrary: fakeService,
+            database: database,
+            store: store,
+            imageDataLoader: { _ in nil },
+            hashComputer: { _ in nil },
+            workQueue: queue
+        )
+        runAndWait(engine, workQueue: queue, progressLog: ProgressLog())
+
+        XCTAssertEqual(engine.state, .done, "分批调度仍必须跑完")
+        XCTAssertEqual(database.assetCount(), count)
+        XCTAssertEqual(database.featureprintCount(), 0)
+    }
+
+    /// 暂停请求在**批次边界**生效，不必等整轮扫描结束。
+    /// 断言：暂停后 fetchAll 不会被再次调用（说明没有跑到下一轮），
+    /// 且状态停在 paused 而不是 done。
+    func testPauseTakesEffectAtBatchBoundaryWithoutFinishingRound() throws {
+        let database = try PhotoLibraryDatabase.inMemory()
+        let store = GRDBKeyValueStore(database: database)
+        let queue = DispatchQueue(label: "test.engine.pause.boundary")
+        let fakeService = FakePhotoLibraryService(records: makeRecords(300))
+        let engine = ScanningEngine(
+            photoLibrary: fakeService,
+            database: database,
+            store: store,
+            imageDataLoader: { _ in nil },
+            hashComputer: { _ in nil },
+            workQueue: queue
+        )
+
+        // fetching 一结束就请求暂停：后续批次必须在边界处停下。
+        fakeService.onFetchBegin = { engine.pause() }
+        engine.runFullScan { _, _ in }
+        queue.sync { }
+
+        assertPaused(engine.state)
+        XCTAssertEqual(fakeService.fetchAllCallCount, 1, "暂停后不得再拉取整库")
+
+        // 恢复后应能续跑到 done，且不重复拉库。
+        engine.resume()
+        queue.sync { }
+        XCTAssertEqual(engine.state, .done, "恢复后应续跑到完成")
+        XCTAssertEqual(fakeService.fetchAllCallCount, 1, "续跑不应再拉整库")
+    }
+
+    /// 扫描进行中收到相册变更：受影响结果必须在后续批次开始前失效。
+    /// 断言：变更资产的自动裁决被清掉，且状态回到 paused 等待重扫。
+    func testLibraryChangeDuringScanInvalidatesResultsBeforeNextBatch() throws {
+        let database = try PhotoLibraryDatabase.inMemory()
+        let store = GRDBKeyValueStore(database: database)
+        let queue = DispatchQueue(label: "test.engine.changed.midscan")
+        let records = makeRecords(300)
+        let fakeService = FakePhotoLibraryService(records: records)
+        let engine = ScanningEngine(
+            photoLibrary: fakeService,
+            database: database,
+            store: store,
+            imageDataLoader: { _ in nil },
+            hashComputer: { _ in nil },
+            workQueue: queue
+        )
+
+        // 第一次拉库时注入一次"资产被修改"的变更通知。
+        var injected = false
+        fakeService.onFetchBegin = {
+            guard !injected else { return }
+            injected = true
+            engine.refreshAfterLibraryChange(records: [records[0]])
+        }
+        engine.runFullScan { _, _ in }
+        queue.sync { }
+
+        assertPaused(engine.state)
+        XCTAssertTrue(
+            engine.hasPendingAnalysis,
+            "相册变更必须登记为待分析欠账"
+        )
+        XCTAssertFalse(
+            engine.isResultSetComplete,
+            "存在待分析欠账时不得声明结果集完整"
+        )
+    }
 }
