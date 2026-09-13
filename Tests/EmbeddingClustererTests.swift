@@ -297,8 +297,8 @@ final class ScanningEngineFullChainTests: XCTestCase {
                 }
                 return [Double(hash1), Double(hash2), 1.0]
             },
-            workQueue: queue,
-            batchSizeOverride: 1                // 每批 1 个单元 → 强制跨批累加
+            batchSizeOverride: 1,               // 每批 1 个单元 → 强制跨批累加
+            workQueue: queue
         )
 
         engine.runFullScan { _, _ in }
@@ -379,8 +379,8 @@ final class ScanningEngineFullChainTests: XCTestCase {
                     }
                     return [Double(hash1), Double(hash2), 1.0]
                 },
-                workQueue: queue,
-                batchSizeOverride: 1
+                batchSizeOverride: 1,
+                workQueue: queue
             )
             engine.runFullScan { _, _ in }
             queue.sync { }
