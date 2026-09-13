@@ -39,7 +39,12 @@ struct LargeMediaCandidate: Codable, Equatable {
     }
 
     var canPreselect: Bool {
-        !isOnlyInGroup && !record.favorite && !record.isEdited && record.locallyAvailable
+        // 必须是**确认**本机可用（.available）；.unknown 与 .notDownloaded 都不算，
+        // 避免把探测未得出结论的资产当作可释放空间（T17 补充验收）。
+        !isOnlyInGroup
+            && !record.favorite
+            && !record.isEdited
+            && record.localAvailability == .available
     }
 }
 

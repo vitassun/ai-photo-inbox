@@ -366,6 +366,8 @@ struct SinglePhotoViewer: View {
     let onDismiss: () -> Void
     var mediaType: AssetMediaType = .image
     var isLivePhoto = false
+    /// 预览结果回调（主线程）。默认空实现，保持低质量页既有调用不变。
+    var onLoadOutcome: (Bool) -> Void = { _ in }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -378,7 +380,8 @@ struct SinglePhotoViewer: View {
             MediaPreviewView(
                 localIdentifier: localIdentifier,
                 mediaType: mediaType,
-                isLivePhoto: isLivePhoto
+                isLivePhoto: isLivePhoto,
+                onLoadOutcome: onLoadOutcome
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }

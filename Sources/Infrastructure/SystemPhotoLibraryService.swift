@@ -11,6 +11,7 @@
 // 再经纯函数映射成 AssetRecord —— 映射逻辑不接触 PhotoKit 类型，
 // CI 模拟器可全覆盖单测（含 creationDate 回退与未知 id 契约）。
 
+import AVFoundation   // 视频可用性探测返回 AVAsset
 import Photos
 import PhotosUI   // presentLimitedLibraryPicker 所在框架
 import UIKit
@@ -142,11 +143,32 @@ extension PHAssetSnapshot {
         }
     }
 
-    /// Public, no-network probe for still images. The request's info dictionary
-    /// distinguishes an iCloud miss from a delivered local image; video and
-    /// unusual resource types remain unknown until a dedicated media request.
-    private static func localAvailability(of asset: PHAsset) -> AssetLocalAvailability {
-        guard !Thread.isMainThread, asset.mediaType == .image else { return .unknown }
+    /// 无网络可用性探测的唯一入口。
+    ///
+    /// 契约（T17 补充验收）：
+    /// - 必须在**后台线程**调用，因为底层 PhotoKit 请求是同步等待的；
+    ///   主线程直接返回 `.unknown`，绝不阻塞 UI。
+    /// - `isNetworkAccessAllowed = false` 是硬约束：探测不得触发下载。
+    /// - 返回三态：`.available` / `.notDownloaded` / `.unknown`。
+    ///   `.unknown` **不等于**未下载——调用方必须分别展示（见 AssetLocalAvailability 注释）。
+    ///
+    /// 图像走 fastFormat 缩略图请求；视频走 AVAsset 资源请求，避免全库枚举时
+    /// 逐项解码视频。两者都用 info 字典区分「iCloud 未命中」与「本机已交付」。
+    static func localAvailability(of asset: PHAsset) -> AssetLocalAvailability {
+        guard !Thread.isMainThread else { return .unknown }
+        switch asset.mediaType {
+        case .image:
+            return imageAvailability(of: asset)
+        case .video:
+            return videoAvailability(of: asset)
+        default:
+            return .unknown
+        }
+    }
+
+    /// 图像：1×1 fastFormat 探测。info 里 PHImageResultIsInCloudKey 为 true
+    /// 说明原件只在 iCloud；拿到图像则说明本机有可解码数据。
+    private static func imageAvailability(of asset: PHAsset) -> AssetLocalAvailability {
         let options = PHImageRequestOptions()
         options.deliveryMode = .fastFormat
         options.resizeMode = .fast
@@ -165,6 +187,34 @@ extension PHAssetSnapshot {
                 result = .available
             }
         }
+        return result
+    }
+
+    /// 视频：用资源请求做本地媒体探测。
+    ///
+    /// 为什么用 lowQualityFormat 而非 highQuality：探测只回答「本机有没有原件」，
+    /// 不需要高画质转码，低质量即可让 PhotoKit 命中本机已有资源而不额外生成。
+    /// `isNetworkAccessAllowed = false` 是硬约束——iCloud 未下载的资产不会因此
+    /// 被拉下来，只会回 PHImageResultIsInCloudKey = true。
+    /// 拿不到结论时返回 `.unknown` 而非猜测未下载：未知状态不得计入可释放空间。
+    private static func videoAvailability(of asset: PHAsset) -> AssetLocalAvailability {
+        let options = PHVideoRequestOptions()
+        options.deliveryMode = .fastFormat
+        options.isNetworkAccessAllowed = false
+        options.version = .current
+        var result: AssetLocalAvailability = .unknown
+        let semaphore = DispatchSemaphore(value: 0)
+        PHImageManager.default().requestAVAsset(forVideo: asset, options: options) { avAsset, _, info in
+            if (info?[PHImageResultIsInCloudKey] as? Bool) == true {
+                result = .notDownloaded
+            } else if avAsset != nil {
+                result = .available
+            }
+            semaphore.signal()
+        }
+        // 关闭网络时 PhotoKit 仍可能异步回调；设上限避免拖住扫描批次。
+        // 超时即保持 .unknown——宁可显示未知，也不谎报未下载。
+        _ = semaphore.wait(timeout: .now() + 2)
         return result
     }
 }
@@ -196,6 +246,37 @@ final class SystemPhotoLibraryService: PhotoLibraryServiceProtocol {
         return Self.assetRecords(from: Self.snapshots(in: fetch), matching: identifiers)
     }
 
+    /// 重新探测本机可用性。整批移到全局后台队列执行——探测内部是同步等待的
+    /// PhotoKit 请求，放在调用线程会阻塞 UI。探测全程关闭网络，不触发下载。
+    func probeLocalAvailability(
+        of identifiers: [String],
+        completion: @escaping ([String: AssetLocalAvailability]) -> Void
+    ) {
+        var seen = Set<String>()
+        let normalized = identifiers.filter { !$0.isEmpty && seen.insert($0).inserted }
+        guard !normalized.isEmpty else {
+            DispatchQueue.main.async { completion([:]) }
+            return
+        }
+        DispatchQueue.global(qos: .userInitiated).async {
+            var result: [String: AssetLocalAvailability] = [:]
+            result.reserveCapacity(normalized.count)
+            // 每项独立探测：单项抛错或超时不影响整批，缺失的 id 一律补 .unknown。
+            for id in normalized {
+                let fetch = PHAsset.fetchAssets(withLocalIdentifiers: [id], options: nil)
+                guard let asset = fetch.firstObject else {
+                    // 资产已不存在（可能已被删除）：不给结论，交由调用方按 id 消失处理。
+                    continue
+                }
+                result[id] = PHAssetSnapshot.localAvailability(of: asset)
+            }
+            for id in normalized where result[id] == nil {
+                result[id] = .unknown
+            }
+            DispatchQueue.main.async { completion(result) }
+        }
+    }
+
     func requestDelete(
         of identifiers: [String],
         completion: @escaping (Bool, Error?) -> Void
@@ -211,6 +292,12 @@ final class SystemPhotoLibraryService: PhotoLibraryServiceProtocol {
         }
     }
 
+    /// 提交**单批**删除并回传系统结果。
+    ///
+    /// 分批职责已上移到 DeletionCoordinator（T10 补充验收）：服务不再自行切批，
+    /// 只提交调用方交来的这一批，避免服务内部循环导致"下一批提交前无法重新复核"。
+    /// 为兼容旧调用点，若入参超过单批上限，仍按 DeletionFlow 切分但**逐批提交**，
+    /// 首批失败即把后续批次标记为 skipped。
     func requestDeleteDetailed(
         of identifiers: [String],
         completion: @escaping (DeletionRequestResult) -> Void

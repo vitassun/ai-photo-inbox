@@ -11,6 +11,10 @@ struct MediaPreviewView: View {
     let localIdentifier: String
     let mediaType: AssetMediaType
     let isLivePhoto: Bool
+    /// 预览成功/失败回调，在主线程触发。大媒体页用它把"能本地预览"回写成
+    /// 页面状态——但注意：预览成功只证明**可解码**，不证明原件一定在本机，
+    /// 因此调用方不得据此直接把可用性判定为 .available。
+    var onLoadOutcome: (Bool) -> Void = { _ in }
 
     @State private var image: UIImage?
     @State private var livePhoto: PHLivePhoto?
@@ -65,7 +69,10 @@ struct MediaPreviewView: View {
             guard let asset = PHAsset.fetchAssets(
                 withLocalIdentifiers: [localIdentifier], options: nil
             ).firstObject else {
-                DispatchQueue.main.async { self.failed = true }
+                DispatchQueue.main.async {
+                    self.failed = true
+                    self.onLoadOutcome(false)
+                }
                 return
             }
             if isLivePhoto {
@@ -79,7 +86,13 @@ struct MediaPreviewView: View {
                     options: options
                 ) { photo, _ in
                     DispatchQueue.main.async {
-                        if let photo { self.livePhoto = photo } else { self.failed = true }
+                        if let photo {
+                            self.livePhoto = photo
+                            self.onLoadOutcome(true)
+                        } else {
+                            self.failed = true
+                            self.onLoadOutcome(false)
+                        }
                     }
                 }
             } else if mediaType == .video {
@@ -90,8 +103,10 @@ struct MediaPreviewView: View {
                     DispatchQueue.main.async {
                         if let avAsset {
                             self.player = AVPlayer(playerItem: AVPlayerItem(asset: avAsset))
+                            self.onLoadOutcome(true)
                         } else {
                             self.failed = true
+                            self.onLoadOutcome(false)
                         }
                     }
                 }
@@ -108,7 +123,13 @@ struct MediaPreviewView: View {
                     options: options
                 ) { img, _ in delivered = img }
                 DispatchQueue.main.async {
-                    if let delivered { self.image = delivered } else { self.failed = true }
+                    if let delivered {
+                        self.image = delivered
+                        self.onLoadOutcome(true)
+                    } else {
+                        self.failed = true
+                        self.onLoadOutcome(false)
+                    }
                 }
             }
         }

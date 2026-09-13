@@ -175,10 +175,34 @@ final class ScanningEngine: ScanningEngineProtocol {
 
     /// 仅在 workQueue 上读写。
     private var isDriving = false
+    /// 防止批次调度重入：已排队下一批时不再重复入队。仅在 workQueue 上读写。
+    private var isSchedulingNextBatch = false
     /// 相册在当前扫描轮次中发生变更时置位；本轮不打断，完成后丢弃可能过期的镜像。
     private var pendingLibraryChange = false
     private var pendingChangedIDs: Set<String> = []
     private var pendingChangedRecords: [AssetRecord] = []
+    /// 批次游标：记录各阶段已处理到的位置，使"执行一批"可跨调度调用延续。
+    /// 仅在 workQueue 上读写。
+    private var fetchCursor = 0
+    /// 扫描轮次号。过期批次（轮次已推进）不得把结果写回快照。
+    private var scanEpoch: Int = 0
+    /// 当前批次所属的扫描轮次。`driveUntilInactive()` 在每批开头比对
+    /// `scanEpoch`，不一致即判定为过期批次并整体放弃。
+    /// 只有一轮真正收官（`finishDrivingIfNeededOnQueue`）才会清零。
+    private var activeBatchEpoch: Int = 0
+
+    /// 阶段内部游标：把每个阶段的内层工作也切成有限批次，而不是只拆外围循环。
+    /// 键为阶段，值为该阶段已处理到的资产/组序号。阶段结束或换轮时清空。
+    ///
+    /// scoring 阶段里还串行跑了两个检测 pass（低质量、大媒体）。它们不是
+    /// `ScanPhase` 的成员，但同样需要独立游标，用 `stageKey` 统一成字符串键。
+    private var stageCursors: [String: Int] = [:]
+    /// 本轮 fetching 时定下的资产版本表（id → modificationDate）。
+    /// 各阶段写库前用它校验：资产在批次之间被修改过就不允许落旧特征。
+    private var stageAssetVersions: [String: Date?] = [:]
+    /// 版本校验失败（资产在批次间隙被修改）的资产 id。
+    /// 本批次不再继续处理它们，等下一轮 fetching 以新版本重算。
+    private var expiredAssetIDs: Set<String> = []
 
     init(
         photoLibrary: PhotoLibraryServiceProtocol,
@@ -965,8 +989,31 @@ final class ScanningEngine: ScanningEngineProtocol {
         hydrateForResumeOnQueue()
         guard !isDriving, machine.isActive else { return }
         isDriving = true
+        scanEpoch += 1
+        activeBatchEpoch = scanEpoch
+        fetchCursor = 0
+        stageCursors = [:]
+        stageAssetVersions = [:]
+        expiredAssetIDs = []
+        // 只执行一个批次；后续批次由 driveUntilInactive 重新入队调度。
+        // 收尾（清 progressHandler、处理挂起变更）在 finishDrivingOnQueue 里，
+        // 由最后一个批次触发——不能在每次批次后都清，否则回调会被提前抹掉。
         driveUntilInactive()
+        finishDrivingIfNeededOnQueue()
+    }
+
+    /// 一轮扫描真正结束时收尾：清回调、处理挂起变更。
+    /// 仅当状态机不再活动且没有待调度批次时执行。
+    private func finishDrivingIfNeededOnQueue() {
+        guard isDriving, !machine.isActive, !isSchedulingNextBatch else { return }
         isDriving = false
+        fetchCursor = 0
+        // 轮次收官：过期批次的判定基准随之复位。阶段游标与版本表只在
+        // 本轮内有效，不清掉会让下一轮从中间位置开始、跳过一批资产。
+        activeBatchEpoch = 0
+        stageCursors = [:]
+        stageAssetVersions = [:]
+        expiredAssetIDs = []
         // 回调只服务当前一轮；清掉闭包，避免 SwiftUI View 被引擎长期持有形成引用链。
         snapshotLock.lock()
         progressHandler = nil
@@ -1024,55 +1071,104 @@ final class ScanningEngine: ScanningEngineProtocol {
             return
         }
 
-        setCandidateGroupsSnapshot(groupsIncludingEmbeddings(baseGroups: hashGroups))
+        setCandidateGroupsSnapshot(embeddingGroups(baseGroups: hashGroups))
     }
 
-    /// 逐阶段推进直到没有活动阶段。
-    private func driveUntilInactive() {
-        driveLoop: while machine.isActive {
-            // 阶段边界响应暂停请求。
-            if consumePauseRequest() {
-                pauseOnQueue()
-                break
-            }
-
-            switch machine.phase {
-            case .fetching:
-                if !runFetchingStage() {
-                    // fetching 中途被打断：状态机已被置为 paused，本阶段不得推进
-                    //（否则残缺的资产快照会被当成全量带进后续阶段）。
-                    publishSnapshot()
-                    reportProgress()
-                    break driveLoop
-                }
-            case .hashing:
-                if !runHashingStage() {
-                    publishSnapshot()
-                    reportProgress()
-                    break driveLoop
-                }
-            case .embedding:
-                if !runEmbeddingStage() {
-                    publishSnapshot()
-                    reportProgress()
-                    break driveLoop
-                }
-            case .clustering:
-                if !runClusteringStage() {
-                    publishSnapshot()
-                    reportProgress()
-                    break driveLoop
-                }
-            case .scoring:
-                if !runScoringStage() {
-                    publishSnapshot()
-                    reportProgress()
-                    break driveLoop
-                }
-            case .idle, .done, .paused:
-                break driveLoop
-            }
+    /// 阶段内部游标复用：clustering 阶段被分批调用后，这里只做
+    /// "embedding 已补齐、候选组已按批累加完成"的一致性收尾。
+    /// 真正逐单元组装 embedding 组的工作在 `runClusteringStage()` 里按批执行。
+    private func embeddingGroups(baseGroups: [CandidateGroup]) -> [CandidateGroup] {
+        let claimed = Set(baseGroups.flatMap(\.memberIDs))
+        let pending = fetchedRecords.filter {
+            guard !claimed.contains($0.localIdentifier) else { return false }
+            guard let vector = embeddingByID[$0.localIdentifier] else { return true }
+            return !EmbeddingMath.isUsable(vector)
         }
+        guard pending.isEmpty else { return baseGroups }
+        // 已全部补齐：保留既有组装结果（clustering 阶段已按批累加）。
+        return baseGroups
+    }
+
+    /// 逐阶段推进。每次只执行**一个有限批次**，然后把下一次调用重新排队到
+    /// workQueue，而不是在一个同步循环里跑完整轮（T03/T04 补充验收）。
+    ///
+    /// 这样做的收益：
+    /// - 暂停在批次边界立即生效，不必等整轮结束；
+    /// - 相册变更通知能在大库扫描期间及时插入处理；
+    /// - 单次占用工作队列的时间有上界，UI 与变更监听不会被长时间饿死。
+    private func driveUntilInactive() {
+        // 批次的轮次校验：本轮开始时的 epoch 与当前不一致，说明中途已经有
+        // 新的一轮接管（重启驱动/重新扫描）。此时本批次的中间结果全部过期，
+        // 绝不能写库覆盖新状态——直接放弃，不消耗任何阶段。
+        guard scanEpoch == activeBatchEpoch else { return }
+
+        // 批次边界先处理挂起的失效请求：相册变更会让已算出的结果过期，
+        // 必须在推进到下一批之前失效，否则过期分析会覆盖新状态。
+        if handlePendingInvalidationOnQueue() { return }
+
+        guard machine.isActive else { return }
+
+        let didWork: Bool
+        switch machine.phase {
+        case .fetching:
+            didWork = runFetchingBatch()
+        case .hashing:
+            didWork = runHashingStage()
+        case .embedding:
+            didWork = runEmbeddingStage()
+        case .clustering:
+            didWork = runClusteringStage()
+        case .scoring:
+            didWork = runScoringStage()
+        case .idle, .done, .paused:
+            publishSnapshot()
+            reportProgress()
+            return
+        }
+
+        publishSnapshot()
+        reportProgress()
+
+        guard didWork, machine.isActive else { return }
+        // 调度下一批：重新入队而不是递归/同步循环，让暂停与变更通知有机会插队。
+        scheduleNextBatchOnQueue()
+    }
+
+    /// 把下一批重新排到工作队列尾。与直接调用相比，这保证同队列上排队中的
+    /// 暂停请求、以及其它 async 提交的变更处理先得到执行机会。
+    private func scheduleNextBatchOnQueue() {
+        guard !isSchedulingNextBatch else { return }
+        isSchedulingNextBatch = true
+        let scheduledEpoch = scanEpoch
+        workQueue.async { [weak self] in
+            guard let self else { return }
+            self.isSchedulingNextBatch = false
+            guard self.isDriving, self.machine.isActive,
+                  self.scanEpoch == scheduledEpoch else {
+                // 已被暂停/失效/换轮：本轮到此处为止，走收尾。
+                self.finishDrivingIfNeededOnQueue()
+                return
+            }
+            self.driveUntilInactive()
+            self.finishDrivingIfNeededOnQueue()
+        }
+    }
+
+    /// 在批次边界处理相册变更/失效请求。返回 true 表示本轮已中止
+    /// （调用方应立即返回，不再调度下一批）。
+    private func handlePendingInvalidationOnQueue() -> Bool {
+        snapshotLock.lock()
+        let hasPending = pendingLibraryChange
+        snapshotLock.unlock()
+        guard hasPending else { return false }
+        // 扫描进行中收到相册变更：当前轮次的部分中间结果已不可信。
+        // 先暂停，等下一轮 fetching 重新拉取元数据；不在这里静默继续。
+        if machine.isActive {
+            machine.pause(reason: "相册已变更，等待重新扫描")
+        }
+        publishSnapshot()
+        reportProgress()
+        return true
     }
 
     private func pauseOnQueue() {
@@ -1081,77 +1177,111 @@ final class ScanningEngine: ScanningEngineProtocol {
         reportProgress()
     }
 
-    /// fetching：拉全库元数据 → upsert assets 表 → 逐资产汇报进度。
-    /// 返回 false 表示中途响应了暂停请求（已 pause、阶段未推进）。
-    private func runFetchingStage() -> Bool {
-        let assets = uniqueRecords(
-            photoLibrary.fetchAllAssets().filter { !$0.localIdentifier.isEmpty }
+    /// fetching：拉全库元数据 → 落盘 → 按批次汇报进度。
+    ///
+    /// 返回 true 表示本批完成、还有后续批次可调度；返回 false 表示
+    /// 整个阶段已完成、或中途被打断（暂停/持久化失败/失效）。
+    @discardableResult
+    private func runFetchingBatch() -> Bool {
+        // 首批：拉全库元数据并清空上一轮中间结果。
+        if fetchCursor == 0 {
+            let assets = uniqueRecords(
+                photoLibrary.fetchAllAssets().filter { !$0.localIdentifier.isEmpty }
+            )
+            fetchedRecords = assets
+            hashByID = [:]
+            embeddingByID = [:]
+            scoresByID = [:]
+        }
+
+        let assets = fetchedRecords
+        guard !assets.isEmpty else {
+            // 空库：直接推进，不留游标。
+            fetchCursor = 0
+            completeFetchingStage()
+            return true
+        }
+
+        // 本轮资产版本基线。后续所有阶段写库前都用它校验资产未被修改，
+        // 保证"过期分析结果不能覆盖新状态"。
+        stageAssetVersions = Dictionary(
+            uniqueKeysWithValues: assets.map { ($0.localIdentifier, $0.modificationDate) }
         )
-        fetchedRecords = assets
-        hashByID = [:]
-        embeddingByID = [:]
-        scoresByID = [:]
+        expiredAssetIDs = []
+
+        let batchSize = max(1, AppConfig.scanBatchSize)
+        let end = min(fetchCursor + batchSize, assets.count)
+        for index in fetchCursor..<end {
+            if consumePauseRequest() {
+                machine.pause(reason: "用户暂停")
+                fetchCursor = index
+                return false
+            }
+            machine.setProgress(Double(index + 1) / Double(max(assets.count, 1)))
+        }
+        fetchCursor = end
+        publishSnapshot()
+        reportProgress()
+
+        guard fetchCursor >= assets.count else { return true }
+        fetchCursor = 0
+        completeFetchingStage()
+        return true
+    }
+
+    /// fetching 阶段收尾：落盘资产快照 → 保存全量记录 → 推进阶段。
+    private func completeFetchingStage() {
+        let assets = fetchedRecords
         let fetchedAt = Date()
         if consumePauseRequest() {
             machine.pause(reason: "用户暂停")
-            return false
+            return
         }
         // 全量快照同时负责清理相册外部删除但尚未收到 change observer 事件的旧行。
         guard database.replaceAssetSnapshot(assets, fetchedAt: fetchedAt) else {
             setPersistenceErrorOnQueue("资产索引保存失败，请检查存储空间后重试")
             pauseForPersistenceFailureOnQueue()
-            return false
-        }
-        let total = max(assets.count, 1)
-        for (index, _) in assets.enumerated() {
-            if consumePauseRequest() {
-                machine.pause(reason: "用户暂停")
-                return false
-            }
-            machine.setProgress(Double(index + 1) / Double(total))
-            if (index + 1) % 200 == 0 || index + 1 == assets.count {
-                publishSnapshot()
-                reportProgress()
-            }
-            yieldAfterBatchIfNeeded(index: index)
+            return
         }
         // 先保存全量 AssetRecord，再推进阶段；这样在 hashing/embedding 等
         // 后续阶段被杀时可以比较收藏、编辑、尺寸、时间、地理和 Live Photo 等字段。
         guard persistAssetSnapshotOnQueue() else {
             pauseForPersistenceFailureOnQueue()
-            return false
+            return
         }
         machine.advance()
         publishSnapshot()
         reportProgress()
-        return true
     }
 
     /// hashing：逐资产拉缩略图 → 计算 pHash → 落 featureprints 表；
     /// 阶段末用 (时间×地理×pHash) 产出候选组。无注入实现时空转推进（占位语义保留）。
     /// 已持久化的当前版本哈希直接复用（杀进程续扫不重算）。
+    ///
+    /// 每次调用只处理 [`AppConfig.scanBatchSize`] 张资产：本阶段的**内层**
+    /// 工作量与外围循环一样有上界，暂停/变更通知在批次边界即可生效。
     private func runHashingStage() -> Bool {
-        for (assetId, hash) in database.allFeatureprintHashes(
-            featureVersion: ScanStateMachine.featureVersion,
-            validAssetVersions: assetVersionsOnQueue()
-        ) {
-            hashByID[assetId] = hash
+        let phase = ScanPhase.hashing
+        let total = max(fetchedRecords.count, 1)
+
+        // 首批：载入已持久化的、当前版本仍然有效的哈希。
+        if cursorOnQueue(for: phase) == 0 {
+            hashByID = [:]
+            for (assetId, hash) in database.allFeatureprintHashes(
+                featureVersion: ScanStateMachine.featureVersion,
+                validAssetVersions: assetVersionsOnQueue()
+            ) {
+                hashByID[assetId] = hash
+            }
         }
 
+        let start = min(cursorOnQueue(for: phase), fetchedRecords.count)
+        let end = min(start + max(1, AppConfig.scanBatchSize), fetchedRecords.count)
         var pendingWrites: [FeatureprintWrite] = []
-        let total = max(fetchedRecords.count, 1)
-        for (index, record) in fetchedRecords.enumerated() {
-            if consumePauseRequest() {
-                guard flushFeatureprintWritesOnQueue(
-                    &pendingWrites,
-                    failureMessage: "特征保存失败，请检查存储空间后重试"
-                ) else {
-                    pauseForPersistenceFailureOnQueue()
-                    return false
-                }
-                machine.pause(reason: "用户暂停")
-                return false
-            }
+
+        // 本批先做一次资产版本校验：过期资产不参与计算，也不写库。
+        for index in currentVersionIndicesOnQueue(fetchedRecords, range: start..<end) {
+            let record = fetchedRecords[index]
             if hashByID[record.localIdentifier] == nil,
                let data = imageDataOnQueue(record.localIdentifier),
                let hash = hashComputer(data) {
@@ -1174,13 +1304,8 @@ final class ScanningEngine: ScanningEngineProtocol {
                 }
             }
             throttleForThermalPressure()
-            machine.setProgress(Double(index + 1) / Double(total))
-            if (index + 1) % 200 == 0 || index + 1 == fetchedRecords.count {
-                publishSnapshot()
-                reportProgress()
-            }
-            yieldAfterBatchIfNeeded(index: index)
         }
+
         guard flushFeatureprintWritesOnQueue(
             &pendingWrites,
             failureMessage: "特征保存失败，请检查存储空间后重试"
@@ -1189,6 +1314,24 @@ final class ScanningEngine: ScanningEngineProtocol {
             return false
         }
 
+        if consumePauseRequest() {
+            setCursorOnQueue(start, for: phase)
+            machine.pause(reason: "用户暂停")
+            return false
+        }
+
+        machine.setProgress(Double(end) / Double(total))
+        publishSnapshot()
+        reportProgress()
+
+        guard end >= fetchedRecords.count else {
+            setCursorOnQueue(end, for: phase)
+            // 返回 true：还有后续批次可调度。
+            return true
+        }
+
+        // 本阶段最后一批：组装候选组、推进阶段、清游标。
+        clearCursorOnQueue(for: phase)
         let groups = CandidateGrouper.groups(from: fetchedRecords, hashByID: hashByID)
         setCandidateGroupsSnapshot(groups)
 
@@ -1200,31 +1343,34 @@ final class ScanningEngine: ScanningEngineProtocol {
 
     /// embedding：对未被 pHash 组认领的资产计算特征向量（L2 归一化）→ 落表。
     /// 已持久化的当前版本向量直接复用。无注入实现时空转推进。
+    /// 与 hashing 一样按批次切分内层工作。
     private func runEmbeddingStage() -> Bool {
-        for (assetId, vector) in database.allFeatureprintEmbeddings(
-            featureVersion: ScanStateMachine.featureVersion,
-            validAssetVersions: assetVersionsOnQueue()
-        ) {
-            embeddingByID[assetId] = vector
-        }
+        let phase = ScanPhase.embedding
 
+        // 待处理集合在阶段内是稳定的：只依赖候选组与 fetchedRecords，
+        // 不随游标变化，所以每批重算即可，不必额外持久化。
         let claimed = Set(candidateGroupsOnQueue().flatMap(\.memberIDs))
-        let pending = fetchedRecords.filter { !claimed.contains($0.localIdentifier) }
-        var pendingWrites: [FeatureprintWrite] = []
+        let pending = fetchedRecords.filter {
+            !claimed.contains($0.localIdentifier) && !expiredAssetIDs.contains($0.localIdentifier)
+        }
         let total = max(pending.count, 1)
 
-        for (index, record) in pending.enumerated() {
-            if consumePauseRequest() {
-                guard flushFeatureprintWritesOnQueue(
-                    &pendingWrites,
-                    failureMessage: "特征保存失败，请检查存储空间后重试"
-                ) else {
-                    pauseForPersistenceFailureOnQueue()
-                    return false
-                }
-                machine.pause(reason: "用户暂停")
-                return false
+        if cursorOnQueue(for: phase) == 0 {
+            embeddingByID = [:]
+            for (assetId, vector) in database.allFeatureprintEmbeddings(
+                featureVersion: ScanStateMachine.featureVersion,
+                validAssetVersions: assetVersionsOnQueue()
+            ) {
+                embeddingByID[assetId] = vector
             }
+        }
+
+        let start = min(cursorOnQueue(for: phase), pending.count)
+        let end = min(start + max(1, AppConfig.scanBatchSize), pending.count)
+        var pendingWrites: [FeatureprintWrite] = []
+
+        for index in currentVersionIndicesOnQueue(pending, range: start..<end) {
+            let record = pending[index]
             if embeddingByID[record.localIdentifier] == nil,
                let data = imageDataOnQueue(record.localIdentifier),
                let rawVector = embeddingComputer(data) {
@@ -1250,12 +1396,6 @@ final class ScanningEngine: ScanningEngineProtocol {
                 }
             }
             throttleForThermalPressure()
-            machine.setProgress(Double(index + 1) / Double(total))
-            if (index + 1) % 200 == 0 || index + 1 == pending.count {
-                publishSnapshot()
-                reportProgress()
-            }
-            yieldAfterBatchIfNeeded(index: index)
         }
 
         guard flushFeatureprintWritesOnQueue(
@@ -1266,6 +1406,22 @@ final class ScanningEngine: ScanningEngineProtocol {
             return false
         }
 
+        if consumePauseRequest() {
+            setCursorOnQueue(start, for: phase)
+            machine.pause(reason: "用户暂停")
+            return false
+        }
+
+        machine.setProgress(Double(end) / Double(total))
+        publishSnapshot()
+        reportProgress()
+
+        guard end >= pending.count else {
+            setCursorOnQueue(end, for: phase)
+            return true
+        }
+
+        clearCursorOnQueue(for: phase)
         machine.advance()
         publishSnapshot()
         reportProgress()
@@ -1274,34 +1430,38 @@ final class ScanningEngine: ScanningEngineProtocol {
 
     /// clustering：在 (时间桶 × 地理单元) 内对 embedding 做阈值连通分量，
     /// ≥2 成员的分量并入候选组（pHash 已认领的资产不重复进组）。确定性输出。
+    ///
+    /// 连通分量本身是单元内的一次计算，无法在单元中间安全切分；因此按
+    /// **时间×地理单元**分批，每批处理 [`AppConfig.scanBatchSize`] 个单元。
     private func runClusteringStage() -> Bool {
-        let groups = groupsIncludingEmbeddings(baseGroups: candidateGroupsOnQueue())
-        setCandidateGroupsSnapshot(groups)
+        let phase = ScanPhase.clustering
+        let units = CandidateGrouper.timeGeoUnits(from: fetchedRecords)
+        let total = max(units.count, 1)
 
-        machine.advance()
-        publishSnapshot()
-        reportProgress()
-        return true
-    }
+        // 首批：以 pHash 候选组为基线，并把游标清零。
+        if cursorOnQueue(for: phase) == 0 {
+            setCandidateGroupsSnapshot(candidateGroupsOnQueue())
+        }
 
-    /// 在 pHash 基础组上追加 embedding 连通分量。CandidateGrouper 已按媒体类型
-    /// 切分，且无效/零向量不会被当作“全部相似”。
-    private func groupsIncludingEmbeddings(baseGroups: [CandidateGroup]) -> [CandidateGroup] {
-        var groups = baseGroups
+        let start = min(cursorOnQueue(for: phase), units.count)
+        let end = min(start + max(1, AppConfig.scanBatchSize), units.count)
 
-        for unit in CandidateGrouper.timeGeoUnits(from: fetchedRecords) {
+        // 累加式组装：每批在已有的候选组上追加本批的 embedding 连通分量。
+        // 与一次性全量重算等价（后批看到的 claimed 集合更大），且每批有界。
+        var groups = candidateGroupsOnQueue()
+        for unit in units[start..<end] {
             let claimed = Set(groups.flatMap(\.memberIDs))
             let members = unit.members.filter {
                 guard !claimed.contains($0.localIdentifier),
+                      !expiredAssetIDs.contains($0.localIdentifier),
                       let vector = embeddingByID[$0.localIdentifier] else { return false }
                 return EmbeddingMath.isUsable(vector)
             }
             guard members.count >= 2 else { continue }
 
             let vectors = members.compactMap { member -> (id: String, vector: [Double])? in
-                guard let vector = embeddingByID[member.localIdentifier], EmbeddingMath.isUsable(vector) else {
-                    return nil
-                }
+                guard let vector = embeddingByID[member.localIdentifier],
+                      EmbeddingMath.isUsable(vector) else { return nil }
                 return (id: member.localIdentifier, vector: vector)
             }
             for component in EmbeddingClusterer.components(of: vectors) where component.count >= 2 {
@@ -1317,37 +1477,71 @@ final class ScanningEngine: ScanningEngineProtocol {
                 )
             }
         }
-        return groups
+        setCandidateGroupsSnapshot(groups)
+
+        if consumePauseRequest() {
+            setCursorOnQueue(start, for: phase)
+            machine.pause(reason: "用户暂停")
+            return false
+        }
+
+        machine.setProgress(Double(end) / Double(total))
+        publishSnapshot()
+        reportProgress()
+
+        guard end >= units.count else {
+            setCursorOnQueue(end, for: phase)
+            return true
+        }
+
+        clearCursorOnQueue(for: phase)
+        machine.advance()
+        publishSnapshot()
+        reportProgress()
+        return true
     }
 
     /// scoring：逐组跑 GroupScoring（KeepScore 接线 + 冗余度 + SafetyRules 过滤）
     /// → Best Shot 标记 → 预删除候选集。缺特征的资产按中性值参与评分。
+    ///
+    /// 本阶段每批只评 [`AppConfig.scanBatchSize`] 个组。组间互不依赖，
+    /// 已评组累加进快照；标签保留在阶段末的检测 pass 里执行（它们需要
+    /// 完整候选组集合，且各自也按批次推进）。
     private func runScoringStage() -> Bool {
+        let phase = ScanPhase.scoring
         guard let protectedIDs = keepDecisionIDsOnQueue() else {
             pauseForSafetyFailureOnQueue()
             return false
         }
         keepDecisionIDsForRun = protectedIDs
 
-        // 复用已持久化的分数（信封 kind=3）。
-        for (assetId, values) in database.allFeatureprintScores(
-            featureVersion: ScanStateMachine.featureVersion,
-            validAssetVersions: assetVersionsOnQueue()
-        )
-        where values.count == 4 {
-            scoresByID[assetId] = VisionResultAggregator.aggregate(
-                clarity: values[0], aesthetics: values[1],
-                faceQuality: values[2], saliency: values[3]
+        // 首批：载入已持久化分数，并清空上一轮评分快照。
+        if cursorOnQueue(for: phase) == 0 {
+            setScoredGroupsSnapshot([])
+            for (assetId, values) in database.allFeatureprintScores(
+                featureVersion: ScanStateMachine.featureVersion,
+                validAssetVersions: assetVersionsOnQueue()
             )
+            where values.count == 4 {
+                scoresByID[assetId] = VisionResultAggregator.aggregate(
+                    clarity: values[0], aesthetics: values[1],
+                    faceQuality: values[2], saliency: values[3]
+                )
+            }
         }
 
         let groups = candidateGroupsOnQueue()
         let total = max(groups.count, 1)
-        var scored: [ScoredGroup] = []
-        for (index, group) in groups.enumerated() {
-            if consumePauseRequest() {
-                machine.pause(reason: "用户暂停")
-                return false
+        let start = min(cursorOnQueue(for: phase), groups.count)
+        let end = min(start + max(1, AppConfig.scanBatchSize), groups.count)
+        var scored = scoredGroupsOnQueue()
+
+        for index in start..<end {
+            let group = groups[index]
+            // 组内成员版本校验：成员在批次之间被修改过就不能按旧特征评分，
+            // 该组整体留待下一轮重算，避免过期分析落库。
+            if group.members.contains(where: { !assetVersionIsCurrentOnQueue($0) }) {
+                continue
             }
 
             // 缺分数的成员补算（经注入的分析器；失败回退中性值由聚合层保证）。
@@ -1395,14 +1589,25 @@ final class ScanningEngine: ScanningEngineProtocol {
             ))
 
             throttleForThermalPressure()
-            machine.setProgress(Double(index + 1) / Double(total))
-            publishSnapshot()
-            reportProgress()
-            yieldAfterBatchIfNeeded(index: index)
         }
-
         setScoredGroupsSnapshot(scored)
 
+        if consumePauseRequest() {
+            setCursorOnQueue(start, for: phase)
+            machine.pause(reason: "用户暂停")
+            return false
+        }
+
+        machine.setProgress(Double(end) / Double(total))
+        publishSnapshot()
+        reportProgress()
+
+        guard end >= groups.count else {
+            setCursorOnQueue(end, for: phase)
+            return true
+        }
+
+        clearCursorOnQueue(for: phase)
         guard detectLowQuality() else { return false }
         guard detectLargeMedia() else { return false }
         guard persistSnapshotsOnQueue() else {
@@ -1430,21 +1635,25 @@ final class ScanningEngine: ScanningEngineProtocol {
     /// 成本注记：每个未认领资产多一次缩略图读取（曝光探测）；V1 先正确后省，
     /// 大库优化属后续迭代（可与 hashing 阶段合并采样）。
     private func detectLowQuality() -> Bool {
+        let phase = ScanPhase.scoring
         let claimed = Set(candidateGroupsOnQueue().flatMap(\.memberIDs))
         guard let protectedIDs = keepDecisionIDsForRun else {
             pauseForSafetyFailureOnQueue()
             return false
         }
-        var detected: [LowQualityCandidate] = []
 
-        for (index, record) in fetchedRecords.enumerated() {
-            if consumePauseRequest() {
-                machine.pause(reason: "用户暂停")
-                return false
-            }
+        let total = max(fetchedRecords.count, 1)
+        let start = min(cursorOnQueue(for: Self.lowQualityPassKey), fetchedRecords.count)
+        let end = min(start + max(1, AppConfig.scanBatchSize), fetchedRecords.count)
+        var detected = start == 0 ? [] : lowQualitySnapshotOnQueue()
+
+        for index in start..<end {
+            let record = fetchedRecords[index]
             guard !claimed.contains(record.localIdentifier),
                   record.mediaType == .image,
                   !record.favorite, !record.isEdited else { continue }
+            // 版本校验：批次之间被修改过的资产不落旧裁决。
+            guard assetVersionIsCurrentOnQueue(record) else { continue }
 
             let assetId = record.localIdentifier
             // 用户明确保留/移出候选的资产在后续重扫中也不应被自动加回。
@@ -1522,12 +1731,26 @@ final class ScanningEngine: ScanningEngineProtocol {
                 }
             }
             throttleForThermalPressure()
-            yieldAfterBatchIfNeeded(index: index)
         }
 
         snapshotLock.lock()
         lowQualitySnapshot = detected
         snapshotLock.unlock()
+
+        if consumePauseRequest() {
+            setCursorOnQueue(start, for: Self.lowQualityPassKey)
+            machine.pause(reason: "用户暂停")
+            return false
+        }
+        machine.setProgress(Double(end) / Double(total))
+        publishSnapshot()
+        reportProgress()
+
+        guard end >= fetchedRecords.count else {
+            setCursorOnQueue(end, for: Self.lowQualityPassKey)
+            return false  // 检测 pass 未跑完，本批次到此为止
+        }
+        clearCursorOnQueue(for: Self.lowQualityPassKey)
         return true
     }
 
@@ -1554,14 +1777,21 @@ final class ScanningEngine: ScanningEngineProtocol {
             )
         }
 
-        for (index, candidate) in safeCandidates.enumerated() {
-            if consumePauseRequest() {
-                machine.pause(reason: "用户暂停")
-                return false
-            }
-            // 未下载的 iCloud 原件只做信息展示，页面不可勾选，也不应制造
-            // 一个用户无法执行的待确认删除裁决。
-            guard candidate.record.locallyAvailable else { continue }
+        let total = max(safeCandidates.count, 1)
+        let start = min(cursorOnQueue(for: Self.largeMediaPassKey), safeCandidates.count)
+        let end = min(start + max(1, AppConfig.scanBatchSize), safeCandidates.count)
+        // 累加进快照：每一批的检测结果都要保留，否则多批之后只剩最后一批。
+        var detected = start == 0 ? [] : largeMediaSnapshotOnQueue()
+
+        for index in start..<end {
+            let candidate = safeCandidates[index]
+            // 只有**确认**本机可用的资产才制造自动删除裁决。iCloud 未下载
+            // 与状态未知都只做信息展示：前者用户无法立即执行，后者探测尚未
+            // 得出结论，都不应生成一个无法执行的待确认删除项。
+            // 注意：候选仍进快照（用户看不到不等于该资产不存在），只是不落裁决。
+            detected.append(candidate)
+            guard candidate.record.localAvailability == .available,
+                  assetVersionIsCurrentOnQueue(candidate.record) else { continue }
             let assetId = candidate.record.localIdentifier
             if candidate.canPreselect {
                 guard database.setDecision(
@@ -1576,12 +1806,26 @@ final class ScanningEngine: ScanningEngineProtocol {
                 }
             }
             throttleForThermalPressure()
-            yieldAfterBatchIfNeeded(index: index)
         }
 
         snapshotLock.lock()
-        largeMediaSnapshot = safeCandidates
+        largeMediaSnapshot = detected
         snapshotLock.unlock()
+
+        if consumePauseRequest() {
+            setCursorOnQueue(start, for: Self.largeMediaPassKey)
+            machine.pause(reason: "用户暂停")
+            return false
+        }
+        machine.setProgress(Double(end) / Double(total))
+        publishSnapshot()
+        reportProgress()
+
+        guard end >= safeCandidates.count else {
+            setCursorOnQueue(end, for: Self.largeMediaPassKey)
+            return false  // 检测 pass 未跑完，本批次到此为止
+        }
+        clearCursorOnQueue(for: Self.largeMediaPassKey)
         return true
     }
 
@@ -1631,12 +1875,12 @@ final class ScanningEngine: ScanningEngineProtocol {
         handler?(phase, progress)
     }
 
+    /// 批次边界钩子。曾经用 Thread.sleep 模拟"让出队列"，现已移除：
+    /// 真正的让出由 `scheduleNextBatchOnQueue()` 把下一批重新入队实现，
+    /// 队列上排队中的暂停/变更通知因此能先执行。这里保留空实现只为
+    /// 兼容既有调用点，新增代码不应再依赖它。
     private func yieldAfterBatchIfNeeded(index: Int) {
-        guard index >= 0,
-              (index + 1) % AppConfig.scanBatchSize == 0 else { return }
-        // 工作队列上的阶段仍保持串行，但在批次边界主动让出一个调度片段，
-        // 让暂停/相册变更通知能在大库扫描中及时排队。
-        Thread.sleep(forTimeInterval: 0.001)
+        _ = index
     }
 
     private func imageDataOnQueue(_ assetID: String) -> Data? {
@@ -1700,6 +1944,93 @@ final class ScanningEngine: ScanningEngineProtocol {
         return result
     }
 
+    // MARK: 阶段边界：游标与版本校验
+
+    /// 读取某个阶段的内部游标（已处理条数）。
+    ///
+    /// `stageKey` 把 `ScanPhase` 和 scoring 阶段里的两个检测 pass
+    /// （`lowQualityPass` / `largeMediaPass`）统一成一个键空间。
+    private func stageKey(_ phase: ScanPhase) -> String {
+        switch phase {
+        case .fetching: return "fetching"
+        case .hashing: return "hashing"
+        case .embedding: return "embedding"
+        case .clustering: return "clustering"
+        case .scoring: return "scoring"
+        case .idle, .done, .paused: return "inactive"
+        }
+    }
+
+    /// scoring 阶段内部的低质量检测 pass 游标键（非 ScanPhase 成员）。
+    private static let lowQualityPassKey = "scoring.lowQuality"
+    /// scoring 阶段内部的大媒体检测 pass 游标键（非 ScanPhase 成员）。
+    private static let largeMediaPassKey = "scoring.largeMedia"
+
+    private func cursorOnQueue(for phase: ScanPhase) -> Int {
+        stageCursors[stageKey(phase)] ?? 0
+    }
+
+    private func cursorOnQueue(for key: String) -> Int {
+        stageCursors[key] ?? 0
+    }
+
+    /// 写回某个阶段的内部游标。0 视为"无游标"，直接删除键。
+    private func setCursorOnQueue(_ value: Int, for phase: ScanPhase) {
+        setCursorOnQueue(value, for: stageKey(phase))
+    }
+
+    private func setCursorOnQueue(_ value: Int, for key: String) {
+        if value <= 0 {
+            stageCursors[key] = nil
+        } else {
+            stageCursors[key] = value
+        }
+    }
+
+    /// 阶段完成后清掉自己的游标，避免残留值影响下次进入同一阶段。
+    private func clearCursorOnQueue(for phase: ScanPhase) {
+        stageCursors[stageKey(phase)] = nil
+    }
+
+    private func clearCursorOnQueue(for key: String) {
+        stageCursors[key] = nil
+    }
+
+    /// 资产内容版本校验：当前相册里的这张资产是否仍与扫描开始时一致。
+    ///
+    /// 批次之间用户可能编辑/替换了资产。若仍按旧版本写特征，新状态会被
+    /// 过期分析结果覆盖——这正是"过期分析结果不能覆盖新状态"要挡的情况。
+    /// 校验失败时把 id 记入 `expiredAssetIDs` 并在本批放弃处理，等下一轮
+    /// fetching 重新取元数据后重算。
+    private func assetVersionIsCurrentOnQueue(_ record: AssetRecord) -> Bool {
+        let id = record.localIdentifier
+        if expiredAssetIDs.contains(id) { return false }
+        guard let baseline = stageAssetVersions[id] else {
+            // 基线里没有这张资产：本批新出现（相册变更），版本无从比较。
+            expiredAssetIDs.insert(id)
+            return false
+        }
+        guard baseline == record.modificationDate else {
+            expiredAssetIDs.insert(id)
+            removeCachedImageOnQueue(id)
+            return false
+        }
+        return true
+    }
+
+    /// 批量版本校验结果：返回本批中版本仍然有效的下标（顺序保持）。
+    private func currentVersionIndicesOnQueue(
+        _ records: [AssetRecord],
+        range: Range<Int>
+    ) -> [Int] {
+        var result: [Int] = []
+        result.reserveCapacity(range.count)
+        for index in range where assetVersionIsCurrentOnQueue(records[index]) {
+            result.append(index)
+        }
+        return result
+    }
+
     /// 当前轮次的资产内容版本。Dictionary 的 value 保留 Optional，
     /// 使数据库能区分“确认没有修改时间”和“根本没有这张资产”。
     private func assetVersionsOnQueue() -> [String: Date?] {
@@ -1753,6 +2084,19 @@ final class ScanningEngine: ScanningEngineProtocol {
         snapshotLock.lock()
         defer { snapshotLock.unlock() }
         return scoredGroupsSnapshot
+    }
+
+    /// 检测 pass 分批累加时读取已有结果，避免多批之后只剩最后一批。
+    private func lowQualitySnapshotOnQueue() -> [LowQualityCandidate] {
+        snapshotLock.lock()
+        defer { snapshotLock.unlock() }
+        return lowQualitySnapshot
+    }
+
+    private func largeMediaSnapshotOnQueue() -> [LargeMediaCandidate] {
+        snapshotLock.lock()
+        defer { snapshotLock.unlock() }
+        return largeMediaSnapshot
     }
 
     private func setCandidateGroupsSnapshot(_ groups: [CandidateGroup]) {

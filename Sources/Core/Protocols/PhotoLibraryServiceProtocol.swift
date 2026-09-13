@@ -62,6 +62,19 @@ protocol PhotoLibraryServiceProtocol {
     /// 按 localIdentifier 批量取快照（断点续扫时校准用）。未知 id 直接忽略。
     func fetchAssets(matching identifiers: [String]) -> [AssetRecord]
 
+    /// 重新探测指定资产的本机可用性（T17 补充）。
+    ///
+    /// 契约：
+    /// - **必须异步**，实现在后台线程执行探测，绝不在调用线程同步等待；
+    ///   大媒体页的"重新探测"按钮依赖这一点不卡 UI。
+    /// - **禁止联网**：探测不得触发 iCloud 下载。
+    /// - 回调切主线程，返回 id → 三态可用性映射；未能得出结论的 id
+    ///   应回传 `.unknown` 而非从字典中省略，以便页面明确区分"未知"与"未下载"。
+    func probeLocalAvailability(
+        of identifiers: [String],
+        completion: @escaping ([String: AssetLocalAvailability]) -> Void
+    )
+
     /// 发起删除请求。
     ///
     /// 红线（T10）：实现必须走 PHPhotoLibrary.performChanges +
@@ -96,5 +109,18 @@ extension PhotoLibraryServiceProtocol {
             )
             completion(DeletionRequestResult(batches: [batch]))
         }
+    }
+
+    /// 默认实现：假实现与历史桩不需要真正探测，统一回传 `.unknown`。
+    /// 注意 `.unknown` 不是"未下载"——调用方不得据此把资产归入未下载分组
+    /// 或计入可释放空间。生产实现（SystemPhotoLibraryService）必须覆盖此方法。
+    func probeLocalAvailability(
+        of identifiers: [String],
+        completion: @escaping ([String: AssetLocalAvailability]) -> Void
+    ) {
+        let unknown = Dictionary(
+            uniqueKeysWithValues: identifiers.map { ($0, AssetLocalAvailability.unknown) }
+        )
+        DispatchQueue.main.async { completion(unknown) }
     }
 }

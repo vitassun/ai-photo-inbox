@@ -58,6 +58,27 @@ struct AssetRecord: Codable, Equatable {
     /// tri-state value so unknown is not mistaken for a confirmed offload.
     var locallyAvailable: Bool { localAvailability.isAvailable }
 
+    /// 用重新探测得到的可用性替换现有值，其余字段原样保留。
+    /// 供大媒体页在"重新探测"成功后原地更新候选，不必重跑整轮扫描。
+    func withLocalAvailability(_ availability: AssetLocalAvailability) -> AssetRecord {
+        AssetRecord(
+            localIdentifier: localIdentifier,
+            favorite: favorite,
+            isEdited: isEdited,
+            mediaType: mediaType,
+            pixelWidth: pixelWidth,
+            pixelHeight: pixelHeight,
+            duration: duration,
+            creationDate: creationDate,
+            modificationDate: modificationDate,
+            isScreenshot: isScreenshot,
+            isLivePhoto: isLivePhoto,
+            latitude: latitude,
+            longitude: longitude,
+            localAvailability: availability
+        )
+    }
+
     init(
         localIdentifier: String,
         favorite: Bool,

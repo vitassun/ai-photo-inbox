@@ -18,19 +18,35 @@ struct LargeMediaView: View {
     @State private var statusText: String?
     @State private var undoKeepID: String?
     @State private var showOffloaded = false
+    @State private var showUnknown = false
+    @State private var isReprobing: Set<String> = []
     @State private var viewerAssetID: String?
 
-    /// 本机可清理（locally_available）与 iCloud 未下载两组。
+    /// 本机能确认元件的候选（含 available 与 unknown 中已确认可预览者）。
+    /// 可勾选、计入可释放估算的**只有** `.available`——见 allSuggestedIDs 与
+    /// sumEstimatedBytes 的过滤条件。
     private var localCandidates: [LargeMediaCandidate] {
-        candidates.filter { $0.record.locallyAvailable }
+        candidates.filter { $0.record.localAvailability != .notDownloaded }
     }
 
     private var offloadedCandidates: [LargeMediaCandidate] {
-        candidates.filter { !$0.record.locallyAvailable }
+        candidates.filter { $0.record.localAvailability == .notDownloaded }
+    }
+
+    /// 状态未知：探测还没给出结论。**不能**混进"iCloud 未下载"里，
+    /// 否则用户会误以为原件在云端，而实际可能只是探测未完成。
+    private var unknownCandidates: [LargeMediaCandidate] {
+        candidates.filter { $0.record.localAvailability == .unknown }
+    }
+
+    /// 可安全预选 / 可勾选 / 计入可释放估算的候选。
+    /// 只有明确 `.available` 的资产才满足；unknown 一律排除（红线 3）。
+    private var confirmedLocalCandidates: [LargeMediaCandidate] {
+        candidates.filter { $0.record.localAvailability == .available }
     }
 
     private var allSuggestedIDs: Set<String> {
-        Set(localCandidates.filter(\.canPreselect).map(\.record.localIdentifier))
+        Set(confirmedLocalCandidates.filter(\.canPreselect).map(\.record.localIdentifier))
     }
 
     private var allSuggestedSelected: Bool {
@@ -44,15 +60,16 @@ struct LargeMediaView: View {
         )
     }
 
-    /// 勾选集的可释放估算（仅本机资产可勾选）。
+    /// 勾选集的可释放估算。只统计**已确认原件在本机**的资产：
+    /// unknown 与 notDownloaded 都不计入，避免虚报可释放空间（红线 3）。
     private var selectedBytes: Int64 {
-        sumEstimatedBytes(localCandidates.filter {
+        sumEstimatedBytes(confirmedLocalCandidates.filter {
             selectedIDs.contains($0.record.localIdentifier)
         })
     }
 
     private var totalLocalBytes: Int64 {
-        sumEstimatedBytes(localCandidates)
+        sumEstimatedBytes(confirmedLocalCandidates)
     }
 
     private func sumEstimatedBytes(_ values: [LargeMediaCandidate]) -> Int64 {
@@ -84,7 +101,10 @@ struct LargeMediaView: View {
                     localIdentifier: context.id,
                     onDismiss: { viewerAssetID = nil },
                     mediaType: record?.mediaType ?? .image,
-                    isLivePhoto: record?.isLivePhoto ?? false
+                    isLivePhoto: record?.isLivePhoto ?? false,
+                    onLoadOutcome: { succeeded in
+                        handlePreviewOutcome(id: context.id, succeeded: succeeded)
+                    }
                 )
             }
     }
@@ -178,7 +198,32 @@ struct LargeMediaView: View {
         List {
             Section {
                 ForEach(localCandidates, id: \.record.localIdentifier) { candidate in
-                    row(candidate)
+                    row(candidate, selectable: candidate.record.localAvailability == .available)
+                }
+            } header: {
+                if !unknownCandidates.isEmpty {
+                    Text("未知状态的项目不可勾选，也不计入可释放估算")
+                }
+            }
+
+            if !unknownCandidates.isEmpty {
+                Section {
+                    if showUnknown {
+                        ForEach(unknownCandidates, id: \.record.localIdentifier) { candidate in
+                            row(candidate, selectable: false)
+                        }
+                    }
+                } header: {
+                    Button {
+                        showUnknown.toggle()
+                    } label: {
+                        HStack {
+                            Image(systemName: showUnknown ? "chevron.down" : "chevron.right")
+                                .font(.caption)
+                            Text("状态未知 \(unknownCandidates.count) 项 · 不计入可释放估算")
+                        }
+                    }
+                    .buttonStyle(.plain)
                 }
             }
 
@@ -223,9 +268,7 @@ struct LargeMediaView: View {
                         .font(.caption2)
                         .foregroundStyle(.orange)
                 }
-                if !candidate.record.locallyAvailable {
-                    Text("iCloud 未下载").font(.caption2).foregroundStyle(.secondary)
-                }
+                availabilityLabel(candidate)
             }
 
             Spacer()
@@ -253,6 +296,31 @@ struct LargeMediaView: View {
             if selectable {
                 Button("保留，不再建议") { keepFromSuggestions(id) }
             }
+        }
+    }
+
+    /// 三态可用性标签。未知**不得**显示成"iCloud 未下载"——两者含义不同：
+    /// 前者是探测没结论，后者是确认原件只在云端。
+    @ViewBuilder
+    private func availabilityLabel(_ candidate: LargeMediaCandidate) -> some View {
+        switch candidate.record.localAvailability {
+        case .available:
+            Text("本机可用")
+                .font(.caption2)
+                .foregroundStyle(.green)
+        case .notDownloaded:
+            Text("iCloud 未下载")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        case .unknown:
+            HStack(spacing: 4) {
+                Text("状态未知")
+                Button("重新探测") { reprobe(candidate.record.localIdentifier) }
+                    .font(.caption2.weight(.semibold))
+                    .disabled(isReprobing.contains(candidate.record.localIdentifier))
+            }
+            .font(.caption2)
+            .foregroundStyle(.orange)
         }
     }
 
@@ -291,7 +359,8 @@ struct LargeMediaView: View {
     private func reload() {
         candidates = environment.engine.largeMediaCandidates
         // 进入页面只展示候选，不替用户做删除选择；刷新时也清掉已离开列表的旧勾选。
-        let validIDs = Set(candidates.filter { $0.record.locallyAvailable }
+        // 只有确认本机可用的项目保留勾选——unknown 与 notDownloaded 都不可勾选。
+        let validIDs = Set(candidates.filter { $0.record.localAvailability == .available }
             .map(\.record.localIdentifier))
         selectedIDs.formIntersection(validIDs)
         selectionSources = selectionSources.filter { validIDs.contains($0.key) }
@@ -305,6 +374,64 @@ struct LargeMediaView: View {
             selectedIDs.insert(id)
             selectionSources[id] = .user
         }
+    }
+
+    /// 预览结果回落。
+    ///
+    /// 语义关键：**缩略图/预览成功 ≠ 原件在本机**。PhotoKit 可能在只有
+    /// 低分辨率代理或优化存储的情况下成功交付预览，因此这里只在
+    /// "可本地预览"这一维度更新页面提示，不擅自把可用性提升为 `.available`。
+    /// 要确认原件在本机，必须走 probeLocalAvailability 的资源级探测。
+    private func handlePreviewOutcome(id: String, succeeded: Bool) {
+        guard succeeded else { return }
+        guard let candidate = candidates.first(where: { $0.record.localIdentifier == id }),
+              candidate.record.localAvailability == .unknown else { return }
+        // 未知状态：预览成功说明本机至少有可解码表示，提示用户可以做一次
+        // 确定性的资源探测来把状态落实，而不是直接当作已确认。
+        statusText = "这项可以本地预览，但尚未确认原件在本机；可点\"重新探测\"确认后再删除。"
+    }
+
+    /// 重新探测单项可用性。探测在服务层后台执行，不阻塞主线程也不触发下载；
+    /// 成功后把新状态写回候选列表，未知状态因此有机会转成确定的可用/未下载。
+    private func reprobe(_ id: String) {
+        guard !isReprobing.contains(id) else { return }
+        isReprobing.insert(id)
+        statusText = "正在重新探测本机可用性…"
+        environment.photoLibraryService.probeLocalAvailability(of: [id]) { mapping in
+            isReprobing.remove(id)
+            guard let availability = mapping[id] else {
+                statusText = "这项资产已不存在，请刷新列表。"
+                return
+            }
+            applyAvailability([id: availability])
+            switch availability {
+            case .available:
+                statusText = "已确认原件在本机，可以勾选删除。"
+            case .notDownloaded:
+                statusText = "已确认原件仅在 iCloud，未下载到本机。"
+            case .unknown:
+                statusText = "仍无法确认本机状态，未计入可释放空间。"
+            }
+        }
+    }
+
+    /// 把探测结果写回候选列表并按新状态收敛勾选，避免已不可用的项目留在勾选集里。
+    private func applyAvailability(_ mapping: [String: AssetLocalAvailability]) {
+        candidates = candidates.map { candidate in
+            guard let availability = mapping[candidate.record.localIdentifier] else {
+                return candidate
+            }
+            return LargeMediaCandidate(
+                record: candidate.record.withLocalAvailability(availability),
+                estimatedBytes: candidate.estimatedBytes,
+                isOnlyInGroup: candidate.isOnlyInGroup
+            )
+        }
+        let selectable = Set(candidates
+            .filter { $0.record.localAvailability == .available }
+            .map(\.record.localIdentifier))
+        selectedIDs.formIntersection(selectable)
+        selectionSources = selectionSources.filter { selectable.contains($0.key) }
     }
 
     private func keepFromSuggestions(_ id: String) {
